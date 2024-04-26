@@ -1,91 +1,127 @@
 <html>
-<head>
-  <title>Real-Time 3D Graphics with WebGL2</title>
-  <link rel="shortcut icon" type="image/png" href="/common/images/favicon.png" />
+  <head>
+    <title>Real-Time 3D Graphics with WebGPU</title>
+    <link
+      rel="shortcut icon"
+      type="image/png"
+      href="/common/images/favicon.png"
+    />
 
-  <!-- libraries -->
-  <link rel="stylesheet" href="/common/lib/normalize.css">
+    <!-- libraries -->
+    <link rel="stylesheet" href="../common/lib/normalize.css" />
 
-  <!-- modules -->
-  <script type="text/javascript" src="/common/js/utils.js"></script>
+    <!-- modules -->
+    <script type="text/javascript" src="../common/js/utils.js"></script>
 
-  <style>
-    canvas {
-      border: 5px dotted blue;
-    }
-  </style>
-
-  <script type="text/javascript">
-    // Enforcing all JS to be executed in "strict mode"
-    'use strict';
-
-    // Global variable to access throughout the application
-    let gl;
-
-    function updateClearColor(...color) {
-      // The ES6 spread operator (...) allows for us to
-      // use elements of an array as arguments to a function
-      gl.clearColor(...color);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.viewport(0, 0, 0, 0);
-    }
-
-    function checkKey(event) {
-      switch (event.keyCode) {
-        // number 1 => green
-        case 49: {
-          updateClearColor(0.2, 0.8, 0.2, 1.0);
-          break;
-        }
-        // number 2 => blue
-        case 50: {
-          updateClearColor(0.2, 0.2, 0.8, 1.0);
-          break;
-        }
-        // number 3 => random color
-        case 51: {
-          updateClearColor(Math.random(), Math.random(), Math.random(), 1.0);
-          break;
-        }
-        // number 4 => get color
-        case 52: {
-          const color = gl.getParameter(gl.COLOR_CLEAR_VALUE);
-          // Don't let the following line confuse you.
-          // It basically rounds up the numbers to one
-          // decimal cipher for visualization purposes.
-
-          // TIP: Given that WebGL's color space ranges
-          // from 0 to 1 you can multiply these values by 255
-          // to display in their RGB values.
-          alert(`clearColor = (
-            ${color[0].toFixed(1)},
-            ${color[1].toFixed(1)},
-            ${color[2].toFixed(1)}
-          )`);
-          window.focus();
-          break;
-        }
+    <style>
+      canvas {
+        border: 5px dotted blue;
       }
-    }
+    </style>
 
-    function init() {
-      // Use the utility method `getCanvas` to retrieve our canvas
-      const canvas = utils.getCanvas('webgl-canvas');
-      // Use the utility method `getGLContext` to retrieve our WebGL 2 context
-      gl = utils.getGLContext(canvas);
+    <script type="text/javascript">
+      "use strict";
 
-      // Call checkKey whenever a key is pressed
-      window.onkeydown = checkKey;
-    }
+      async function init() {
+        const canvas = utils.getCanvas("webgpu-canvas");
 
-    window.onload = init;
-  </script>
-</head>
-<body>
+        // アダプターとデバイスをリクエストする
+        if (!navigator.gpu) {
+          alert("Sorry! WebGPU is not available");
+          return;
+        }
 
-  <canvas id="webgl-canvas" width="800" height="600">
-    Your browser does not support the HTML5 canvas element.
-  </canvas>
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          alert("No appropriate GPUAdapter found.");
+          return;
+        }
 
-</body>
+        const device = await adapter.requestDevice();
+
+        // キャンバスを構成する
+        const context = utils.getGPUContext(canvas);
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+          device: device,
+          format: format,
+          alphaMode: "opaque",
+        });
+
+        // キャンバスをクリアする
+        const clearColor = { r: 0, g: 0, b: 0, a: 1 };
+
+        function updateClearColor(r, g, b, a) {
+          clearColor.r = r;
+          clearColor.g = g;
+          clearColor.b = b;
+          clearColor.a = a;
+
+          const commandEncoder = device.createCommandEncoder();
+          const textureView = context.getCurrentTexture().createView();
+          const renderPassDescriptor = {
+            colorAttachments: [
+              {
+                view: textureView,
+                loadOp: "clear", // レンダリング パス開始時にテクスチャをクリアすることを示します。
+                storeOp: "store", // レンダリング パスが終了したら、レンダリング パスで行われたすべての描画処理の結果をテクスチャに保存することを示します。
+                clearValue: [
+                  clearColor.r,
+                  clearColor.g,
+                  clearColor.b,
+                  clearColor.a,
+                ],
+              },
+            ],
+          };
+          const passEncoder =
+            commandEncoder.beginRenderPass(renderPassDescriptor);
+          passEncoder.end();
+
+          device.queue.submit([commandEncoder.finish()]);
+        }
+
+        function checkKey(event) {
+          console.log(`Key pressed: ${event.key}`); // Debug statement
+
+          const key = event.key; // 使用event.key代替event.keyCode
+          switch (key) {
+            case "1": // 数字1
+              updateClearColor(0.2, 0.8, 0.2, 1.0);
+              break;
+            case "2": // 数字2
+              updateClearColor(0.2, 0.2, 0.8, 1.0);
+              break;
+            case "3": // 数字3
+              updateClearColor(
+                Math.random(),
+                Math.random(),
+                Math.random(),
+                1.0
+              );
+              break;
+            case "4": // 数字4
+              alert(
+                `clearColor = (${clearColor.r.toFixed(
+                  1
+                )}, ${clearColor.g.toFixed(1)}, ${clearColor.b.toFixed(1)})`
+              );
+              window.focus();
+              break;
+          }
+        }
+
+        window.onkeydown = checkKey;
+
+        alert("Hooray! You got a WebGPU context");
+      }
+
+      window.onload = init;
+    </script>
+  </head>
+  <body>
+    <canvas id="webgpu-canvas" width="800" height="600">
+      Your browser does not support the HTML5 canvas element.
+    </canvas>
+  </body>
 </html>
