@@ -1,8 +1,7 @@
-'use strict';
+"use strict";
 
-// A set of utility functions for /common operations across our application
+// A set of utility functions for ......../common operations across our application
 const utils = {
-
   // Find and return a DOM element given an ID
   getCanvas(id) {
     const canvas = document.getElementById(id);
@@ -17,7 +16,10 @@ const utils = {
 
   // Given a canvas element, return the WebGL2 context
   getGLContext(canvas) {
-    return canvas.getContext('webgl2') || console.error('WebGL2 is not available in your browser.');
+    return (
+      canvas.getContext("webgl2") ||
+      console.error("WebGL2 is not available in your browser.")
+    );
   },
 
   // Given a canvas element, expand it to the size of the window
@@ -29,7 +31,7 @@ const utils = {
     };
     expandFullScreen();
     // Resize screen when the browser has triggered the resize event
-    window.addEventListener('resize', expandFullScreen);
+    window.addEventListener("resize", expandFullScreen);
   },
 
   // Given a WebGL context and an id for a shader script,
@@ -43,13 +45,11 @@ const utils = {
     const shaderString = script.text.trim();
 
     let shader;
-    if (script.type === 'x-shader/x-vertex') {
+    if (script.type === "x-shader/x-vertex") {
       shader = gl.createShader(gl.VERTEX_SHADER);
-    }
-    else if (script.type === 'x-shader/x-fragment') {
+    } else if (script.type === "x-shader/x-fragment") {
       shader = gl.createShader(gl.FRAGMENT_SHADER);
-    }
-    else {
+    } else {
       return null;
     }
 
@@ -66,19 +66,18 @@ const utils = {
 
   // Normalize colors from 0-255 to 0-1
   normalizeColor(color) {
-    return color.map(c => c / 255);
+    return color.map((c) => c / 255);
   },
 
   // De-normalize colors from 0-1 to 0-255
   denormalizeColor(color) {
-    return color.map(c => c * 255);
+    return color.map((c) => c * 255);
   },
 
   // Returns computed normals for provided vertices.
   // Note: Indices have to be completely defined--NO TRIANGLE_STRIP only TRIANGLES.
   calculateNormals(vs, ind) {
-    const
-      x = 0,
+    const x = 0,
       y = 1,
       z = 2,
       ns = [];
@@ -93,7 +92,9 @@ const utils = {
     // We work on triads of vertices to calculate
     for (let i = 0; i < ind.length; i += 3) {
       // Normals so i = i+3 (i = indices index)
-      const v1 = [], v2 = [], normal = [];
+      const v1 = [],
+        v2 = [],
+        normal = [];
 
       // p2 - p1
       v1[x] = vs[3 * ind[i + 2] + x] - vs[3 * ind[i + 1] + x];
@@ -127,7 +128,7 @@ const utils = {
       nn[y] = ns[i + y];
       nn[z] = ns[i + z];
 
-      let len = Math.sqrt((nn[x] * nn[x]) + (nn[y] * nn[y]) + (nn[z] * nn[z]));
+      let len = Math.sqrt(nn[x] * nn[x] + nn[y] * nn[y] + nn[z] * nn[z]);
       if (len === 0) len = 1.0;
 
       nn[x] = nn[x] / len;
@@ -149,18 +150,18 @@ const utils = {
     const gui = options.gui || new dat.GUI(options);
     const state = {};
 
-    const isAction = v => typeof v === 'function';
+    const isAction = (v) => typeof v === "function";
 
-    const isFolder = v =>
+    const isFolder = (v) =>
       !isAction(v) &&
-      typeof v === 'object' &&
+      typeof v === "object" &&
       (v.value === null || v.value === undefined);
 
-    const isColor = v =>
-      (typeof v === 'string' && ~v.indexOf('#')) ||
+    const isColor = (v) =>
+      (typeof v === "string" && ~v.indexOf("#")) ||
       (Array.isArray(v) && v.length >= 3);
 
-    Object.keys(settings).forEach(key => {
+    Object.keys(settings).forEach((key) => {
       const settingValue = settings[key];
 
       if (isAction(settingValue)) {
@@ -169,7 +170,9 @@ const utils = {
       }
       if (isFolder(settingValue)) {
         // If it's a folder, recursively call with folder as root settings element
-        return utils.configureControls(settingValue, { gui: gui.addFolder(key) });
+        return utils.configureControls(settingValue, {
+          gui: gui.addFolder(key),
+        });
       }
 
       const {
@@ -190,15 +193,13 @@ const utils = {
       // API, but we'll only need a few for our purposes
       if (options) {
         controller = gui.add(state, key, options);
-      }
-      else if (isColor(value)) {
-        controller = gui.addColor(state, key)
-      }
-      else {
-        controller = gui.add(state, key, min, max, step)
+      } else if (isColor(value)) {
+        controller = gui.addColor(state, key);
+      } else {
+        controller = gui.add(state, key, min, max, step);
       }
 
-      controller.onChange(v => onChange(v, state))
+      controller.onChange((v) => onChange(v, state));
     });
   },
 
@@ -210,8 +211,7 @@ const utils = {
       tangents[i] = [0, 0, 0];
     }
 
-    let
-      a = [0, 0, 0],
+    let a = [0, 0, 0],
       b = [0, 0, 0],
       triTangent = [0, 0, 0];
 
@@ -234,7 +234,11 @@ const utils = {
       const c2c1b = tex1[1] - tex0[1];
       const c3c1b = tex2[0] - tex0[1];
 
-      triTangent = [c3c1b * a[0] - c2c1b * b[0], c3c1b * a[1] - c2c1b * b[1], c3c1b * a[2] - c2c1b * b[2]];
+      triTangent = [
+        c3c1b * a[0] - c2c1b * b[0],
+        c3c1b * a[1] - c2c1b * b[1],
+        c3c1b * a[2] - c2c1b * b[2],
+      ];
 
       vec3.add(triTangent, tangents[i0], triTangent);
       vec3.add(triTangent, tangents[i1], triTangent);
@@ -243,7 +247,7 @@ const utils = {
 
     // Normalize tangents
     const ts = [];
-    tangents.forEach(tan => {
+    tangents.forEach((tan) => {
       vec3.normalize(tan, tan);
       ts.push(tan[0]);
       ts.push(tan[1]);
@@ -251,9 +255,5 @@ const utils = {
     });
 
     return ts;
-  }
-
+  },
 };
-
-
-	

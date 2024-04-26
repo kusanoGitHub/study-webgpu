@@ -1,6 +1,6 @@
 "use strict";
 
-// A set of utility functions for /common operations across our application
+// A set of utility functions for ../common operations across our application
 const utils = {
   // Find and return a DOM element given an ID
   getCanvas(id) {
