@@ -58,6 +58,8 @@
         iboUsage = 0,
         isVerticesVbo = false,
         isConeVertexBufferVbo = false,
+        isIndicesIbo = false,
+        isConeIndexBufferIbo = false,
         projectionMatrix = mat4.create(),
         modelViewMatrix = mat4.create();
 
@@ -152,6 +154,7 @@
         );
         gl.enableVertexAttribArray(program.aVertexPosition);
 
+        // gl.bindBuffer(gl.ARRAY_BUFFER, null); // この行を追記するとVBOの状態が確認できなくなる。バッファの状態を確認するにはバインドしておく必要があるということ。
         coneIndexBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, coneIndexBuffer);
         gl.bufferData(
@@ -184,11 +187,14 @@
 
         try {
           isVerticesVbo = gl.isBuffer(vertices);
+          isIndicesIbo = gl.isBuffer(indices);
         } catch (e) {
           isVerticesVbo = false;
+          isIndicesIbo = false;
         }
 
         isConeVertexBufferVbo = gl.isBuffer(coneVertexBuffer);
+        isConeIndexBufferIbo = gl.isBuffer(coneIndexBuffer);
 
         // Clean
         gl.bindVertexArray(null);
@@ -243,6 +249,11 @@
           : "No";
         document.getElementById("s-is-cone-vertex-buffer-vbo").innerText =
           isConeVertexBufferVbo ? "Yes" : "No";
+        document.getElementById("s-is-indices-ibo").innerText = isIndicesIbo
+          ? "Yes"
+          : "No";
+        document.getElementById("s-is-cone-index-buffer-ibo").innerText =
+          isConeIndexBufferIbo ? "Yes" : "No";
       }
 
       function init() {
@@ -298,6 +309,11 @@
         <li>
           Is coneVertexBuffer a VBO?
           <strong id="s-is-cone-vertex-buffer-vbo"></strong>
+        </li>
+        <li>Is index a IBO? <strong id="s-is-indices-ibo"></strong></li>
+        <li>
+          Is coneindexBuffer a IBO?
+          <strong id="s-is-cone-index-buffer-ibo"></strong>
         </li>
       </ul>
     </div>
