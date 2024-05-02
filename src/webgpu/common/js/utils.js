@@ -22,48 +22,6 @@ const utils = {
     );
   },
 
-  // Given a canvas element, expand it to the size of the window
-  // and ensure that it automatically resizes as the window changes
-  autoResizeCanvas(canvas) {
-    const expandFullScreen = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    };
-    expandFullScreen();
-    // Resize screen when the browser has triggered the resize event
-    window.addEventListener("resize", expandFullScreen);
-  },
-
-  // Given a WebGL context and an id for a shader script,
-  // return a compiled shader
-  getShader(gl, id) {
-    const script = document.getElementById(id);
-    if (!script) {
-      return null;
-    }
-
-    const shaderString = script.text.trim();
-
-    let shader;
-    if (script.type === "x-shader/x-vertex") {
-      shader = gl.createShader(gl.VERTEX_SHADER);
-    } else if (script.type === "x-shader/x-fragment") {
-      shader = gl.createShader(gl.FRAGMENT_SHADER);
-    } else {
-      return null;
-    }
-
-    gl.shaderSource(shader, shaderString);
-    gl.compileShader(shader);
-
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      console.error(gl.getShaderInfoLog(shader));
-      return null;
-    }
-
-    return shader;
-  },
-
   // Normalize colors from 0-255 to 0-1
   normalizeColor(color) {
     return color.map((c) => c / 255);
