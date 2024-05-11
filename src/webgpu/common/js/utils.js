@@ -32,73 +32,66 @@ const utils = {
     return color.map((c) => c * 255);
   },
 
-  // Returns computed normals for provided vertices.
-  // Note: Indices have to be completely defined--NO TRIANGLE_STRIP only TRIANGLES.
+  // 各頂点に対して、その位置データの後にその法線データが続く形式の配列を作成
   calculateNormals(vs, ind) {
     const x = 0,
       y = 1,
       z = 2,
-      ns = [];
+      ns = new Array(vs.length).fill(0); // 法線を初期化
 
-    // For each vertex, initialize normal x, normal y, normal z
-    for (let i = 0; i < vs.length; i += 3) {
-      ns[i + x] = 0.0;
-      ns[i + y] = 0.0;
-      ns[i + z] = 0.0;
-    }
-
-    // We work on triads of vertices to calculate
+    // 頂点毎に法線を計算
     for (let i = 0; i < ind.length; i += 3) {
-      // Normals so i = i+3 (i = indices index)
       const v1 = [],
         v2 = [],
         normal = [];
 
-      // p2 - p1
-      v1[x] = vs[3 * ind[i + 2] + x] - vs[3 * ind[i + 1] + x];
-      v1[y] = vs[3 * ind[i + 2] + y] - vs[3 * ind[i + 1] + y];
-      v1[z] = vs[3 * ind[i + 2] + z] - vs[3 * ind[i + 1] + z];
+      // 各頂点インデックス
+      const i0 = 3 * ind[i],
+        i1 = 3 * ind[i + 1],
+        i2 = 3 * ind[i + 2];
 
-      // p0 - p1
-      v2[x] = vs[3 * ind[i] + x] - vs[3 * ind[i + 1] + x];
-      v2[y] = vs[3 * ind[i] + y] - vs[3 * ind[i + 1] + y];
-      v2[z] = vs[3 * ind[i] + z] - vs[3 * ind[i + 1] + z];
+      // ベクトル v1 (p2 - p1)
+      v1[x] = vs[i2 + x] - vs[i1 + x];
+      v1[y] = vs[i2 + y] - vs[i1 + y];
+      v1[z] = vs[i2 + z] - vs[i1 + z];
 
-      // Cross product by Sarrus Rule
+      // ベクトル v2 (p0 - p1)
+      v2[x] = vs[i0 + x] - vs[i1 + x];
+      v2[y] = vs[i0 + y] - vs[i1 + y];
+      v2[z] = vs[i0 + z] - vs[i1 + z];
+
+      // 外積による法線計算
       normal[x] = v1[y] * v2[z] - v1[z] * v2[y];
       normal[y] = v1[z] * v2[x] - v1[x] * v2[z];
       normal[z] = v1[x] * v2[y] - v1[y] * v2[x];
 
-      // Update the normals of that triangle: sum of vectors
+      // 法線ベクトルの更新
       for (let j = 0; j < 3; j++) {
-        ns[3 * ind[i + j] + x] = ns[3 * ind[i + j] + x] + normal[x];
-        ns[3 * ind[i + j] + y] = ns[3 * ind[i + j] + y] + normal[y];
-        ns[3 * ind[i + j] + z] = ns[3 * ind[i + j] + z] + normal[z];
+        const idx = 3 * ind[i + j];
+        ns[idx + x] += normal[x];
+        ns[idx + y] += normal[y];
+        ns[idx + z] += normal[z];
       }
     }
 
-    // Normalize the result.
-    // The increment here is because each vertex occurs.
+    // 法線の正規化と頂点データとの結合
+    const verticesWithNormals = new Float32Array(vs.length * 2);
     for (let i = 0; i < vs.length; i += 3) {
-      // With an offset of 3 in the array (due to x, y, z contiguous values)
-      const nn = [];
-      nn[x] = ns[i + x];
-      nn[y] = ns[i + y];
-      nn[z] = ns[i + z];
+      const len = Math.sqrt(
+        ns[i + x] * ns[i + x] + ns[i + y] * ns[i + y] + ns[i + z] * ns[i + z]
+      );
+      const scale = len > 0 ? 1.0 / len : 1.0;
 
-      let len = Math.sqrt(nn[x] * nn[x] + nn[y] * nn[y] + nn[z] * nn[z]);
-      if (len === 0) len = 1.0;
-
-      nn[x] = nn[x] / len;
-      nn[y] = nn[y] / len;
-      nn[z] = nn[z] / len;
-
-      ns[i + x] = nn[x];
-      ns[i + y] = nn[y];
-      ns[i + z] = nn[z];
+      const vertexOffset = i * 2;
+      verticesWithNormals[vertexOffset] = vs[i + x];
+      verticesWithNormals[vertexOffset + 1] = vs[i + y];
+      verticesWithNormals[vertexOffset + 2] = vs[i + z];
+      verticesWithNormals[vertexOffset + 3] = ns[i + x] * scale;
+      verticesWithNormals[vertexOffset + 4] = ns[i + y] * scale;
+      verticesWithNormals[vertexOffset + 5] = ns[i + z] * scale;
     }
 
-    return ns;
+    return verticesWithNormals;
   },
 
   // A simpler API on top of the dat.GUI API, specifically
