@@ -20,7 +20,7 @@
       #version 300 es
       precision mediump float;
 
-      uniform mat4 uModelViewMatrix;
+      uniform mat4 uModelViewMatrix; // カメラ座標系
       uniform mat4 uProjectionMatrix;
       uniform mat4 uNormalMatrix;
       uniform vec3 uLightDirection;
@@ -31,24 +31,23 @@
       in vec3 aVertexNormal;
 
       out vec4 vVertexColor;
-
       void main(void) {
-        // Calculate the normal vector
+        // 法線ベクトルの計算
         vec3 N = normalize(vec3(uNormalMatrix * vec4(aVertexNormal, 1.0)));
 
-        // Normalized light direction
+        // 光源ベクトルの正規化
         vec3 L = normalize(uLightDirection);
 
-        // Dot product of the normal product and negative light direction vector
+        // 法線と光源のドット積計算
         float lambertTerm = dot(N, -L);
 
-        // Calculating the diffuse color based on the Lambertian reflection model
+        // ランバート反射に基づく拡散色の計算
         vec3 Id = uMaterialDiffuse * uLightDiffuse * lambertTerm;
 
-        // Set the varying to be used inside of the fragment shader
+        // 頂点単位で色を計算
         vVertexColor = vec4(Id, 1.0);
 
-        // Setting the vertex position
+        // 頂点位置をクリップ座標系に変換
         gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aVertexPosition, 1.0);
       }
     </script>
@@ -58,14 +57,14 @@
         #version 300 es
       precision mediump float;
 
-        // Expect the interpolated value from the vertex shader
+        // 頂点シェーダーからの色情報を受け取る
         in vec4 vVertexColor;
 
-        // Return the final color as fragColor
+        // 最終的なフラグメントの色
         out vec4 fragColor;
 
         void main(void)  {
-          // Simply set the value passed in from the vertex shader
+          // 頂点シェーダーから受け取った色をそのまま出力
           fragColor = vVertexColor;
         }
     </script>
@@ -80,7 +79,7 @@
         sphereIndicesBuffer,
         lightDiffuseColor = [1, 1, 1],
         lightDirection = [0, -1, -1],
-        sphereColor = [0.5, 0.8, 0.1],
+        sphereColor = [1.0, 0.0, 0.0],
         modelViewMatrix = mat4.create(),
         projectionMatrix = mat4.create(),
         normalMatrix = mat4.create();
@@ -111,7 +110,7 @@
 
         gl.useProgram(program);
 
-        // Set locations onto the `program` instance
+        // GLSLに値を渡すため、uniform変数の位置を取得
         program.aVertexPosition = gl.getAttribLocation(
           program,
           "aVertexPosition"
@@ -138,6 +137,7 @@
       }
 
       function initLights() {
+        // GLSLに値を渡す
         gl.uniform3fv(program.uLightDirection, lightDirection);
         gl.uniform3fv(program.uLightDiffuse, lightDiffuseColor);
         gl.uniform3fv(program.uMaterialDiffuse, sphereColor);
@@ -986,9 +986,10 @@
         mat4.invert(normalMatrix, normalMatrix);
         mat4.transpose(normalMatrix, normalMatrix);
 
-        gl.uniformMatrix4fv(program.uModelViewMatrix, false, modelViewMatrix);
-        gl.uniformMatrix4fv(program.uProjectionMatrix, false, projectionMatrix);
-        gl.uniformMatrix4fv(program.uNormalMatrix, false, normalMatrix);
+        // GLSLに値を渡す
+        gl.uniformMatrix4fv(program.uModelViewMatrix, false, modelViewMatrix); // Set the model view matrix
+        gl.uniformMatrix4fv(program.uProjectionMatrix, false, projectionMatrix); // Set the projection matrix
+        gl.uniformMatrix4fv(program.uNormalMatrix, false, normalMatrix); // Set the normal matrix
 
         // We will start using the `try/catch` to capture any errors from our `draw` calls
         try {
@@ -998,6 +999,7 @@
 
           // Draw
           gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
+          // gl.drawElements(gl.LINES, indices.length, gl.UNSIGNED_SHORT, 0);
 
           // Clean
           gl.bindVertexArray(null);
