@@ -1,0 +1,391 @@
+<html>
+  <head>
+    <title>Real-Time 3D Graphics with WebGPU</title>
+    <link rel="stylesheet" href="../../common/lib/normalize.css" />
+    <script type="text/javascript" src="../../common/js/utils.js"></script>
+    <script type="text/javascript" src="../../common/lib/dat.gui.js"></script>
+    <script type="module">
+      ("use strict");
+
+      import {
+        vec3,
+        mat4,
+      } from "https://wgpu-matrix.org/dist/1.x/wgpu-matrix.module.js";
+
+      const degToRad = (d) => (d * Math.PI) / 180;
+
+      let canvas,
+        device,
+        context,
+        canvasFormat,
+        vertexWithNormalBuffer,
+        verticesWithNormals,
+        indexBuffer,
+        indices,
+        uniformBuffer,
+        cellPipeline,
+        uniformBindGroup,
+        depthTextureView,
+        lightDirection = vec3.fromValues(-0, -0, -1),
+        lightAmbient = vec3.fromValues(0.01, 0.01, 0.01),
+        lightDiffuse = vec3.fromValues(0.5, 0.5, 0.5),
+        materialDiffuse = vec3.fromValues(0.1, 0.5, 0.8),
+        clearColor = [0.8, 0.8, 0.8, 1.0],
+        azimuth = 0,
+        elevation = 0;
+
+      async function init() {
+        canvas = setupCanvas();
+        await setupWebGPU(canvas);
+        await setupShadersAndPipeline();
+        setupBuffers();
+        setupUniforms();
+        render();
+        document.onkeydown = processKey;
+      }
+
+      function setupCanvas() {
+        canvas = utils.getCanvas("webgpu-canvas");
+        autoResizeCanvas(canvas);
+        return canvas;
+      }
+
+      async function setupWebGPU(canvas) {
+        if (!navigator.gpu) {
+          throw new Error("WebGPU not supported on this browser.");
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          throw new Error("No appropriate GPUAdapter found.");
+        }
+        device = await adapter.requestDevice();
+        context = utils.getGPUContext(canvas);
+        canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+          device: device,
+          format: canvasFormat,
+        });
+      }
+
+      async function setupShadersAndPipeline() {
+        const vertexShaderModule = device.createShaderModule({
+          code: await fetch("./vertexShader.wgsl").then((res) => res.text()),
+        });
+
+        const fragmentShaderModule = device.createShaderModule({
+          code: await fetch("./fragmentShader.wgsl").then((res) => res.text()),
+        });
+
+        const vertexBufferLayout = {
+          arrayStride: 6 * Float32Array.BYTES_PER_ELEMENT, // 位置xyzデータ + 法線xyzデータ * float32は4バイト
+          attributes: [
+            // position
+            {
+              format: "float32x3",
+              offset: 0,
+              shaderLocation: 0,
+            },
+            // normal
+            {
+              format: "float32x3",
+              offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+              shaderLocation: 1,
+            },
+          ],
+        };
+
+        const uniformBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, // vertexとfragmentシェーダーの両方でuniformを使用できる
+              buffer: {
+                type: "uniform",
+              },
+            },
+          ],
+        });
+
+        cellPipeline = device.createRenderPipeline({
+          label: "Cell pipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [{ format: canvasFormat }],
+          },
+          primitive: {
+            topology: "triangle-list",
+            cullMode: "back",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: true,
+            depthCompare: "less-equal", // WebGL2のgl.LEQUALと同等の設定
+          },
+        });
+      }
+
+      function setupBuffers() {
+        const vertices = new Float32Array([
+          -20,
+          -8,
+          20, // 0
+          -10,
+          -8,
+          0, // 1
+          10,
+          -8,
+          0, // 2
+          20,
+          -8,
+          20, // 3
+          -20,
+          8,
+          20, // 4
+          -10,
+          8,
+          0, // 5
+          10,
+          8,
+          0, // 6
+          20,
+          8,
+          20, // 7
+        ]);
+
+        indices = new Uint16Array([
+          0, 5, 4, 1, 5, 0, 1, 6, 5, 2, 6, 1, 2, 7, 6, 3, 7, 2,
+        ]);
+
+        let verticesWithNormals = utils.calculateNormals(vertices, indices);
+
+        vertexWithNormalBuffer = device.createBuffer({
+          label: "Vertex With Normals Buffer",
+          size: verticesWithNormals.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true,
+        });
+
+        new Float32Array(vertexWithNormalBuffer.getMappedRange()).set(
+          verticesWithNormals
+        );
+        vertexWithNormalBuffer.unmap();
+
+        indexBuffer = device.createBuffer({
+          label: "Index Buffer",
+          size: indices.byteLength,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(indexBuffer, 0, indices);
+
+        const depthTexture = device.createTexture({
+          size: [canvas.width, canvas.height, 1],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        depthTextureView = depthTexture.createView();
+      }
+
+      function setupUniforms() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = 0.1;
+        const far = 10000;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        const modelViewMatrix = mat4.identity();
+        mat4.translate(modelViewMatrix, [0, 0, -40], modelViewMatrix);
+
+        const normalMatrix = mat4.inverse(modelViewMatrix);
+        mat4.transpose(normalMatrix, normalMatrix);
+
+        const FLOAT_SIZE = 4;
+        const MAT4_SIZE = 16 * FLOAT_SIZE;
+        const VEC3_SIZE = 3 * FLOAT_SIZE;
+        const VEC3_PADDING = 4; // 12バイトは16バイトにアラインメントするためのパディング
+
+        // 3つのmat4、7つのvec3、1つのfloat32
+        // 【重要】f32は最後のvec3メモリレイアウトの4列目に配置するのでサイズカウントしない
+        const alignedSize = 3 * MAT4_SIZE + 4 * (VEC3_SIZE + VEC3_PADDING);
+
+        const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+        let offset = 0;
+
+        uniformData.set(projectionMatrix, offset);
+        offset += MAT4_SIZE / FLOAT_SIZE;
+
+        uniformData.set(modelViewMatrix, offset);
+        offset += MAT4_SIZE / FLOAT_SIZE;
+
+        uniformData.set(normalMatrix, offset);
+        offset += MAT4_SIZE / FLOAT_SIZE;
+
+        uniformData.set(lightDirection, offset);
+        offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+        uniformData.set(lightAmbient, offset);
+        offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+        uniformData.set(lightDiffuse, offset);
+        offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+        uniformData.set(materialDiffuse, offset);
+
+        uniformBuffer = device.createBuffer({
+          size: uniformData.byteLength,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+        uniformBindGroup = device.createBindGroup({
+          layout: cellPipeline.getBindGroupLayout(0),
+          entries: [
+            {
+              binding: 0,
+              resource: {
+                buffer: uniformBuffer,
+                size: uniformData.byteLength,
+              },
+            },
+          ],
+        });
+      }
+
+      function updateUniforms(lightDirection) {
+        const FLOAT_SIZE = 4;
+        const MAT4_SIZE = 16 * FLOAT_SIZE;
+        const VEC3_SIZE = 3 * FLOAT_SIZE;
+        const VEC3_PADDING = 4;
+        const alignedSize = VEC3_SIZE + VEC3_PADDING;
+        const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+
+        uniformData.set(lightDirection, 0);
+
+        device.queue.writeBuffer(
+          uniformBuffer,
+          3 * MAT4_SIZE,
+          uniformData.buffer,
+          uniformData.byteOffset,
+          alignedSize
+        );
+      }
+
+      async function draw() {
+        const commandEncoder = device.createCommandEncoder();
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: context.getCurrentTexture().createView(),
+              loadOp: "clear",
+              clearValue: [...clearColor],
+              storeOp: "store",
+            },
+          ],
+          depthStencilAttachment: {
+            view: depthTextureView,
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        pass.setPipeline(cellPipeline);
+        pass.setVertexBuffer(0, vertexWithNormalBuffer);
+        pass.setIndexBuffer(indexBuffer, "uint16");
+        pass.setBindGroup(0, uniformBindGroup);
+        pass.drawIndexed(indices.length);
+        pass.end();
+        device.queue.submit([commandEncoder.finish()]);
+      }
+
+      function render() {
+        requestAnimationFrame(render);
+        draw();
+      }
+
+      function processKey(ev) {
+        const lightDirection = new Float32Array(3);
+        const incrementValue = 10;
+        console.log(ev);
+
+        switch (ev.keyCode) {
+          case 37:
+            azimuth -= incrementValue;
+            break;
+          case 38:
+            elevation += incrementValue;
+            break;
+          case 39:
+            azimuth += incrementValue;
+            break;
+          case 40:
+            elevation -= incrementValue;
+            break;
+        }
+
+        azimuth %= 360;
+        elevation %= 360;
+
+        const theta = (elevation * Math.PI) / 180;
+        const phi = (azimuth * Math.PI) / 180;
+
+        lightDirection[0] = Math.cos(theta) * Math.sin(phi);
+        lightDirection[1] = Math.sin(theta);
+        lightDirection[2] = Math.cos(theta) * -Math.cos(phi);
+
+        updateUniforms(lightDirection);
+      }
+
+      function autoResizeCanvas(canvas) {
+        const expandFullScreen = () => {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          if (device && context) {
+            context.configure({
+              device: device,
+              format: canvasFormat,
+              size: { width: canvas.width, height: canvas.height },
+            });
+
+            // 深度ステンシルバッファを再作成してサイズを更新
+            const depthTexture = device.createTexture({
+              size: [canvas.width, canvas.height, 1],
+              format: "depth24plus",
+              usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+            depthTextureView = depthTexture.createView();
+
+            setupUniforms();
+          }
+        };
+
+        expandFullScreen();
+        window.addEventListener("resize", expandFullScreen);
+      }
+
+      function releaseResources() {
+        vertexWithNormalBuffer.destroy();
+        indexBuffer.destroy();
+        uniformBuffer.destroy();
+      }
+
+      window.onload = init;
+      window.addEventListener("unload", releaseResources);
+    </script>
+  </head>
+  <body>
+    <canvas id="webgpu-canvas">
+      Your browser does not support the HTML5 canvas element.
+    </canvas>
+    <div id="info">
+      <p>Use arrows keys (left, right, up, down) to move the light</p>
+    </div>
+  </body>
+</html>
