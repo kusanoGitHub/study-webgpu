@@ -32,6 +32,61 @@ const utils = {
     return color.map((c) => c * 255);
   },
 
+  // 頂点情報とインデックス情報を受け取り、法線情報を計算して返す
+  createNormals(vertices, indices) {
+    const x = 0,
+      y = 1,
+      z = 2;
+    const normals = new Array(vertices.length).fill(0); // 法線を初期化
+
+    // 各三角形について法線を計算
+    for (let i = 0; i < indices.length; i += 3) {
+      const i0 = indices[i] * 3;
+      const i1 = indices[i + 1] * 3;
+      const i2 = indices[i + 2] * 3;
+
+      const v0 = [vertices[i0 + x], vertices[i0 + y], vertices[i0 + z]];
+      const v1 = [vertices[i1 + x], vertices[i1 + y], vertices[i1 + z]];
+      const v2 = [vertices[i2 + x], vertices[i2 + y], vertices[i2 + z]];
+
+      // ベクトル v1 (v1 - v0)
+      const vector1 = [v1[x] - v0[x], v1[y] - v0[y], v1[z] - v0[z]];
+      // ベクトル v2 (v2 - v0)
+      const vector2 = [v2[x] - v0[x], v2[y] - v0[y], v2[z] - v0[z]];
+
+      // 外積による法線計算
+      const normal = [
+        vector1[y] * vector2[z] - vector1[z] * vector2[y],
+        vector1[z] * vector2[x] - vector1[x] * vector2[z],
+        vector1[x] * vector2[y] - vector1[y] * vector2[x],
+      ];
+
+      // 法線ベクトルの更新
+      for (let j = 0; j < 3; j++) {
+        const idx = indices[i + j] * 3;
+        normals[idx + x] += normal[x];
+        normals[idx + y] += normal[y];
+        normals[idx + z] += normal[z];
+      }
+    }
+
+    // 法線の正規化
+    for (let i = 0; i < vertices.length; i += 3) {
+      const len = Math.sqrt(
+        normals[i + x] * normals[i + x] +
+          normals[i + y] * normals[i + y] +
+          normals[i + z] * normals[i + z]
+      );
+      if (len > 0) {
+        normals[i + x] /= len;
+        normals[i + y] /= len;
+        normals[i + z] /= len;
+      }
+    }
+
+    return normals;
+  },
+
   // 各頂点に対して、その位置データの後にその法線データが続く形式の配列を作成
   calculateNormals(vs, ind) {
     const x = 0,
