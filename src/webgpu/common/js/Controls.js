@@ -1,8 +1,7 @@
-'use strict';
+"use strict";
 
-// Abstraction over common controls for user interaction with a 3D scene
+// 3Dシーンとのユーザーインタラクションのための共通コントロールの抽象化
 class Controls {
-
   constructor(camera, canvas) {
     this.camera = camera;
     this.canvas = canvas;
@@ -24,36 +23,37 @@ class Controls {
     this.motionFactor = 10;
     this.keyIncrement = 5;
 
-    canvas.onmousedown = event => this.onMouseDown(event);
-    canvas.onmouseup = event => this.onMouseUp(event);
-    canvas.onmousemove = event => this.onMouseMove(event);
-    window.onkeydown = event => this.onKeyDown(event);
-    window.onkeyup = event => this.onKeyUp(event);
+    // イベントハンドラの設定
+    canvas.onmousedown = (event) => this.onMouseDown(event);
+    canvas.onmouseup = (event) => this.onMouseUp(event);
+    canvas.onmousemove = (event) => this.onMouseMove(event);
+    window.onkeydown = (event) => this.onKeyDown(event);
+    window.onkeyup = (event) => this.onKeyUp(event);
   }
 
-  // Sets picker for picking objects
+  // オブジェクトをピッキングするためのピッカーを設定
   setPicker(picker) {
     this.picker = picker;
   }
 
-  // Returns 3D coordinates
+  // 2D座標を返す
   get2DCoords(event) {
     let top = 0,
       left = 0,
       canvas = this.canvas;
 
-    while (canvas && canvas.tagName !== 'BODY') {
+    while (canvas && canvas.tagName !== "BODY") {
       top += canvas.offsetTop;
       left += canvas.offsetLeft;
       canvas = canvas.offsetParent;
     }
 
-    left += window.pageXOffset;
-    top -= window.pageYOffset;
+    left += window.scrollX;
+    top -= window.scrollY;
 
     return {
       x: event.clientX - left,
-      y: this.canvas.height - (event.clientY - top)
+      y: this.canvas.height - (event.clientY - top),
     };
   }
 
@@ -73,7 +73,12 @@ class Controls {
     this.y = event.clientY;
     this.button = event.button;
 
-    this.dstep = Math.max(this.camera.position[0], this.camera.position[1], this.camera.position[2]) / 100;
+    this.dstep =
+      Math.max(
+        this.camera.position[0],
+        this.camera.position[1],
+        this.camera.position[2]
+      ) / 100;
 
     if (!this.picker) return;
 
@@ -104,9 +109,7 @@ class Controls {
     }
 
     if (!this.button) {
-      this.alt
-        ? this.dolly(dy)
-        : this.rotate(dx, dy);
+      this.alt ? this.dolly(dy) : this.rotate(dx, dy);
     }
   }
 
@@ -134,17 +137,18 @@ class Controls {
     }
   }
 
+  // ドリー操作
   dolly(value) {
     if (value > 0) {
       this.dloc += this.dstep;
-    }
-    else {
+    } else {
       this.dloc -= this.dstep;
     }
 
     this.camera.dolly(this.dloc);
   }
 
+  // 回転操作
   rotate(dx, dy) {
     const { width, height } = this.canvas;
 
@@ -157,5 +161,4 @@ class Controls {
     this.camera.changeAzimuth(azimuth);
     this.camera.changeElevation(elevation);
   }
-
 }

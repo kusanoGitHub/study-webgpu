@@ -1,8 +1,13 @@
-'use strict';
+"use strict";
 
-// Abstraction over constructing and interacting with a 3D scene using a camera
-class Camera {
+import {
+  vec3,
+  vec4,
+  mat4,
+} from "https://wgpu-matrix.org/dist/1.x/wgpu-matrix.module.js";
 
+// 3Dシーンをカメラで構築および操作するための抽象化
+export default class Camera {
   constructor(type = Camera.ORBITING_TYPE) {
     this.position = vec3.create();
     this.focus = vec3.create();
@@ -14,8 +19,8 @@ class Camera {
 
     this.matrix = mat4.create();
 
-    // You could have these options be passed in via the constructor
-    // or allow the consumer to change them directly
+    // これらのオプションをコンストラクタ経由で渡すこともできますし、
+    // 使用者が直接変更できるようにすることもできます
     this.steps = 0;
     this.azimuth = 0;
     this.elevation = 0;
@@ -26,24 +31,24 @@ class Camera {
     this.setType(type);
   }
 
-  // Return whether the camera is in orbiting mode
+  // カメラが軌道モードにあるかどうかを返す
   isOrbiting() {
     return this.type === Camera.ORBITING_TYPE;
   }
 
-  // Return whether the camera is in tracking mode
+  // カメラが追跡モードにあるかどうかを返す
   isTracking() {
     return this.type === Camera.TRACKING_TYPE;
   }
 
-  // Change camera type
+  // カメラの種類を変更する
   setType(type) {
     ~Camera.TYPES.indexOf(type)
-      ? this.type = type
+      ? (this.type = type)
       : console.error(`Camera type (${type}) not supported`);
   }
 
-  // Position the camera back home
+  // カメラをホーム位置に戻す
   goHome(home) {
     if (home) {
       this.home = home;
@@ -54,11 +59,11 @@ class Camera {
     this.setElevation(0);
   }
 
-  // Dolly the camera
+  // カメラをドリー（前後移動）する
   dolly(stepIncrement) {
-    const normal = vec3.create();
+    let normal = vec3.create();
     const newPosition = vec3.create();
-    vec3.normalize(normal, this.normal);
+    normal = vec3.normalize(this.normal);
 
     const step = stepIncrement - this.steps;
 
@@ -66,8 +71,7 @@ class Camera {
       newPosition[0] = this.position[0] - step * normal[0];
       newPosition[1] = this.position[1] - step * normal[1];
       newPosition[2] = this.position[2] - step * normal[2];
-    }
-    else {
+    } else {
       newPosition[0] = this.position[0];
       newPosition[1] = this.position[1];
       newPosition[2] = this.position[2] - step;
@@ -77,24 +81,24 @@ class Camera {
     this.setPosition(newPosition);
   }
 
-  // Change camera position
+  // カメラの位置を変更する
   setPosition(position) {
-    vec3.copy(this.position, position);
+    this.position = vec3.copy(position);
     this.update();
   }
 
-  // Change camera focus
+  // カメラの焦点を変更する
   setFocus(focus) {
-    vec3.copy(this.focus, focus);
+    this.focus = vec3.copy(focus);
     this.update();
   }
 
-  // Set camera azimuth
+  // カメラの方位角を設定する
   setAzimuth(azimuth) {
     this.changeAzimuth(azimuth - this.azimuth);
   }
 
-  // Change camera azimuth
+  // カメラの方位角を変更する
   changeAzimuth(azimuth) {
     this.azimuth += azimuth;
 
@@ -105,12 +109,12 @@ class Camera {
     this.update();
   }
 
-  // Set camera elevation
+  // カメラの仰角を設定する
   setElevation(elevation) {
     this.changeElevation(elevation - this.elevation);
   }
 
-  // Change camera elevation
+  // カメラの仰角を変更する
   changeElevation(elevation) {
     this.elevation += elevation;
 
@@ -121,61 +125,54 @@ class Camera {
     this.update();
   }
 
-  // Update the camera orientation
+  // カメラの方向を計算する
   calculateOrientation() {
-    const right = vec4.create();
-    vec4.set(right, 1, 0, 0, 0);
-    vec4.transformMat4(right, right, this.matrix);
-    vec3.copy(this.right, right);
+    let right = vec4.fromValues(1, 0, 0, 0);
+    right = vec4.transformMat4(right, this.matrix);
+    this.right = vec3.copy(right);
 
-    const up = vec4.create();
-    vec4.set(up, 0, 1, 0, 0);
-    vec4.transformMat4(up, up, this.matrix);
-    vec3.copy(this.up, up);
+    let up = vec4.fromValues(0, 1, 0, 0);
+    up = vec4.transformMat4(up, this.matrix);
+    this.up = vec3.copy(up);
 
-    const normal = vec4.create();
-    vec4.set(normal, 0, 0, 1, 0);
-    vec4.transformMat4(normal, normal, this.matrix);
-    vec3.copy(this.normal, normal);
+    let normal = vec4.fromValues(0, 0, 1, 0);
+    normal = vec4.transformMat4(normal, this.matrix);
+    this.normal = vec3.copy(normal);
   }
 
-  // Update camera values
+  // カメラの値を更新する
   update() {
     mat4.identity(this.matrix);
 
     if (this.isTracking()) {
-      mat4.translate(this.matrix, this.matrix, this.position);
-      mat4.rotateY(this.matrix, this.matrix, this.azimuth * Math.PI / 180);
-      mat4.rotateX(this.matrix, this.matrix, this.elevation * Math.PI / 180);
-    }
-    else {
-      mat4.rotateY(this.matrix, this.matrix, this.azimuth * Math.PI / 180);
-      mat4.rotateX(this.matrix, this.matrix, this.elevation * Math.PI / 180);
-      mat4.translate(this.matrix, this.matrix, this.position);
+      mat4.translate(this.matrix, this.position, this.matrix);
+      mat4.rotateY(this.matrix, (this.azimuth * Math.PI) / 180, this.matrix);
+      mat4.rotateX(this.matrix, (this.elevation * Math.PI) / 180, this.matrix);
+    } else {
+      mat4.rotateY(this.matrix, (this.azimuth * Math.PI) / 180, this.matrix);
+      mat4.rotateX(this.matrix, (this.elevation * Math.PI) / 180, this.matrix);
+      mat4.translate(this.matrix, this.position, this.matrix);
     }
 
-    // We only update the position if we have a tracking camera.
-    // For an orbiting camera we do not update the position. If
-    // Why do you think we do not update the position?
+    // 追跡カメラの場合のみ位置を更新します。
+    // 軌道カメラの場合は位置を更新しません。なぜ位置を更新しないと思いますか？
     if (this.isTracking()) {
-      const position = vec4.create();
-      vec4.set(position, 0, 0, 0, 1);
-      vec4.transformMat4(position, position, this.matrix);
+      const position = vec4.fromValues(0, 0, 0, 1);
+      vec4.transformMat4(position, this.matrix, position);
       vec3.copy(this.position, position);
     }
 
     this.calculateOrientation();
   }
 
-  // Returns the view transform
+  // ビュー変換行列を返す
   getViewTransform() {
-    const matrix = mat4.create();
-    mat4.invert(matrix, this.matrix);
+    let matrix = mat4.create();
+    matrix = mat4.inverse(this.matrix);
     return matrix;
   }
-
 }
 
-// Two defined modes for the camera
-Camera.TYPES = ['ORBITING_TYPE', 'TRACKING_TYPE'];
-Camera.TYPES.forEach(type => Camera[type] = type);
+// カメラの2つの定義済みモード
+Camera.TYPES = ["ORBITING_TYPE", "TRACKING_TYPE"];
+Camera.TYPES.forEach((type) => (Camera[type] = type));
