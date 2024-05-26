@@ -32,6 +32,16 @@ const utils = {
     return color.map((c) => c * 255);
   },
 
+  // バッファサイズのパディング
+
+  padUint16ArrayToMultipleOf4(array) {
+    const byteLength = array.byteLength;
+    const paddingSize = (4 - (byteLength % 4)) % 4;
+    const paddedArray = new Uint8Array(byteLength + paddingSize);
+    paddedArray.set(new Uint8Array(array.buffer));
+    return new Uint16Array(paddedArray.buffer);
+  },
+
   // 頂点情報とインデックス情報を受け取り、法線情報を計算して返す
   createNormals(vertices, indices) {
     const x = 0,

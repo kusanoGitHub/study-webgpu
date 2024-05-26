@@ -1,0 +1,585 @@
+<html>
+  <head>
+    <title>Real-Time 3D Graphics with WebGPU</title>
+    <link rel="stylesheet" href="../../common/lib/normalize.css" />
+    <script type="text/javascript" src="../../common/js/utils.js"></script>
+    <script type="text/javascript" src="../../common/lib/dat.gui.js"></script>
+    <script type="text/javascript" src="../../common/js/Axis.js"></script>
+    <script type="text/javascript" src="../../common/js/Floor.js"></script>
+    <script
+      type="text/javascript"
+      src="../../common/js/EventEmitter.js"
+    ></script>
+    <script type="text/javascript" src="../../common/js/Clock.js"></script>
+    <script type="module">
+      ("use strict");
+      import {
+        vec3,
+        mat4,
+      } from "https://wgpu-matrix.org/dist/1.x/wgpu-matrix.module.js";
+
+      const FLOAT_SIZE = 4,
+        MAT4_SIZE = 16 * FLOAT_SIZE,
+        VEC3_SIZE = 3 * FLOAT_SIZE,
+        VEC3_PADDING = 4,
+        degToRad = (d) => (d * Math.PI) / 180;
+
+      let canvas,
+        device,
+        context,
+        canvasFormat,
+        trianglePipeline,
+        linePipeline,
+        objects = [],
+        buffers = [],
+        depthTextureView,
+        lightPosition = vec3.fromValues(0, 120, 120),
+        lightAmbient = vec3.fromValues(0.2, 0.2, 0.2),
+        lightDiffuse = vec3.fromValues(1, 1, 1),
+        materialDiffuse = vec3.fromValues(1, 1, 1),
+        materialAmbient = vec3.fromValues(0.2, 0.2, 0.2),
+        materialSpecular = vec3.fromValues(1, 1, 1),
+        clearColor = [0.9, 0.9, 0.9, 1.0],
+        WORLD_COORDINATES = "World Coordinates",
+        CAMERA_COORDINATES = "Camera Coordinates",
+        coordinates = WORLD_COORDINATES,
+        modelViewMatrix,
+        cameraMatrix,
+        home = [0, -2, -50],
+        position = [0, -2, -50],
+        rotation = [0, 0, 0],
+        clock = new Clock();
+
+      async function init() {
+        canvas = setupCanvas();
+        await setupWebGPU(canvas);
+        await loadObjects(); // オブジェクトによってトポロジーを変更するため、パイプライン作成前に読み込む
+        await setupShadersAndPipeline();
+        setupBuffers();
+        draw();
+        initControls();
+
+        clock.on("tick", () => {
+          updateUniforms();
+          draw();
+        });
+      }
+
+      function setupCanvas() {
+        canvas = utils.getCanvas("webgpu-canvas");
+        autoResizeCanvas(canvas);
+        return canvas;
+      }
+
+      async function setupWebGPU(canvas) {
+        if (!navigator.gpu) {
+          throw new Error("WebGPU not supported on this browser.");
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          throw new Error("No appropriate GPUAdapter found.");
+        }
+        device = await adapter.requestDevice();
+        context = utils.getGPUContext(canvas);
+        canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+          device: device,
+          format: canvasFormat,
+        });
+      }
+
+      async function setupShadersAndPipeline() {
+        const vertexShaderModule = device.createShaderModule({
+          code: await fetch("./vertexShader.wgsl").then((res) => res.text()),
+        });
+
+        const fragmentShaderModule = device.createShaderModule({
+          code: await fetch("./fragmentShader.wgsl").then((res) => res.text()),
+        });
+
+        const vertexBufferLayout = {
+          arrayStride: 6 * Float32Array.BYTES_PER_ELEMENT, // 位置xyz + 法線xyz + オブジェクトID * float32は4バイト
+          attributes: [
+            // position
+            {
+              format: "float32x3",
+              offset: 0,
+              shaderLocation: 0,
+            },
+            // normal
+            {
+              format: "float32x3",
+              offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+              shaderLocation: 1,
+            },
+          ],
+        };
+
+        const uniformBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: {
+                type: "uniform",
+              },
+            },
+          ],
+        });
+
+        trianglePipeline = device.createRenderPipeline({
+          label: "Triangle pipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [{ format: canvasFormat }],
+          },
+          primitive: {
+            topology: "triangle-list",
+            cullMode: "none",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: true,
+            depthCompare: "less-equal",
+          },
+        });
+
+        // 一部オブジェクトはトポロジーを線で描画したいので、新たにパイプラインを作成
+        linePipeline = device.createRenderPipeline({
+          label: "Line pipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [{ format: canvasFormat }],
+          },
+          primitive: {
+            topology: "line-list",
+            cullMode: "none",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: true,
+            depthCompare: "less-equal",
+          },
+        });
+      }
+
+      async function loadObjects() {
+        const objectPromises = [
+          addObject(new Floor(80, 2)),
+          addObject(new Axis(82)),
+          loadObject("../../common/models/geometries/cone3.json", "cone"),
+        ];
+
+        await Promise.all(objectPromises)
+          .then(() => {
+            console.log("All objects loaded:", objects);
+          })
+          .catch((error) => {
+            console.error("Error loading objects:", error);
+          });
+      }
+
+      function addObject(data) {
+        objects.push(data);
+      }
+
+      function loadObject(filePath, alias) {
+        return fetch(filePath)
+          .then((res) => res.json())
+          .then((data) => {
+            data.alias = alias;
+            objects.push(data);
+          });
+      }
+
+      function setupBuffers() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = 0.1;
+        const far = 1000;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        // 3つのmat4、6つのvec3 + パディング
+        const SUM_MAT4_SIZE = 3 * MAT4_SIZE;
+        const SUM_VEC3_SIZE = 6 * (VEC3_SIZE + VEC3_PADDING);
+
+        const alignedSize = SUM_MAT4_SIZE + SUM_VEC3_SIZE;
+
+        objects.forEach((object, i) => {
+          modelViewMatrix = mat4.identity();
+          mat4.translate(modelViewMatrix, home, modelViewMatrix);
+
+          const normalMatrix = mat4.inverse(modelViewMatrix);
+          mat4.transpose(normalMatrix, normalMatrix);
+
+          const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+          let offset = 0;
+
+          uniformData.set(projectionMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(modelViewMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(normalMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightPosition, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightDiffuse, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightAmbient, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.diffuse ?? materialDiffuse, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.ambient ?? materialAmbient, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.specular ?? materialSpecular, offset);
+          offset += VEC3_SIZE / FLOAT_SIZE; // 4バイトのwireframeを格納するためのパディングは不要
+
+          uniformData[offset] = object.wireframe ? 1 : 0;
+
+          const uniformBuffer = device.createBuffer({
+            label: "Uniform Buffer",
+            size: uniformData.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Uniform Bind Group",
+            layout: object.wireframe // 一部のオブジェクトは線で描画するため、パイプラインを切り替える
+              ? linePipeline.getBindGroupLayout(0)
+              : trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: uniformData.byteLength,
+                },
+              },
+            ],
+          });
+
+          const vertices = object.vertices;
+          let indices = new Uint16Array(object.indices);
+          const normals = utils.createNormals(vertices, indices);
+          const vertexData = [];
+
+          for (let i = 0; i < vertices.length; i += 3) {
+            vertexData.push(vertices[i], vertices[i + 1], vertices[i + 2]); // position
+            vertexData.push(normals[i], normals[i + 1], normals[i + 2]); // normal
+          }
+          const vertexDataFloat32Array = new Float32Array(vertexData);
+
+          const vertexBuffer = device.createBuffer({
+            label: "Vertex With Normals Buffer",
+            size: vertexDataFloat32Array.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(vertexBuffer, 0, vertexDataFloat32Array);
+
+          // インデックスを4の倍数にパディングしないとエラーが発生する
+          indices = utils.padUint16ArrayToMultipleOf4(indices);
+
+          const indexBuffer = device.createBuffer({
+            label: "Index Buffer",
+            size: indices.byteLength,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(indexBuffer, 0, indices);
+
+          buffers.push({
+            vertexBuffer: vertexBuffer,
+            indexBuffer: indexBuffer,
+            indexLength: indices.length,
+            uniformBindGroup: uniformBindGroup,
+            uniformBuffer: uniformBuffer,
+            bindGroupSize: uniformData.byteLength,
+            wireframe: object.wireframe, // 線で描画するかどうかのフラグ
+          });
+        });
+
+        const depthTexture = device.createTexture({
+          size: [canvas.width, canvas.height, 1],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        depthTextureView = depthTexture.createView();
+      }
+
+      function updateUniforms() {
+        modelViewMatrix = mat4.identity();
+        cameraMatrix = mat4.identity();
+        const normalMatrix = mat4.identity();
+        if (coordinates === WORLD_COORDINATES) {
+          console.log("modelview");
+          mat4.translate(modelViewMatrix, position, modelViewMatrix);
+          cameraMatrix = mat4.inverse(modelViewMatrix); //
+        } else {
+          console.log("camera");
+          mat4.translate(cameraMatrix, position, cameraMatrix);
+          modelViewMatrix = mat4.inverse(cameraMatrix); // カメラ座標系のモデルビュー行列を求めるために逆行列を求める
+        }
+
+        mat4.transpose(normalMatrix, cameraMatrix); // cameraMatrixはmodelviewMatrixの逆行列なので、この値を転置することで法線を求める
+
+        // 2つのmat4
+        const SUM_MAT4_SIZE = 2 * MAT4_SIZE;
+        const alignedSize = SUM_MAT4_SIZE;
+
+        const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+        let offset = 0;
+
+        uniformData.set(modelViewMatrix, offset);
+        offset += MAT4_SIZE / FLOAT_SIZE;
+
+        uniformData.set(normalMatrix, offset);
+
+        objects.forEach((object, i) => {
+          const uniformBuffer = buffers[i].uniformBuffer;
+          const bindGroupSize = buffers[i].bindGroupSize;
+          device.queue.writeBuffer(
+            uniformBuffer,
+            MAT4_SIZE,
+            uniformData.buffer,
+            uniformData.byteOffset,
+            alignedSize
+          );
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Update Uniform Bind Group",
+            layout: object.wireframe
+              ? linePipeline.getBindGroupLayout(0)
+              : trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: bindGroupSize, // 更新用のサイズではなく、bindGroup生成時のサイズを指定する必要がある
+                },
+              },
+            ],
+          });
+
+          buffers[i].uniformBindGroup = uniformBindGroup;
+        });
+      }
+
+      async function draw() {
+        const commandEncoder = device.createCommandEncoder();
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: context.getCurrentTexture().createView(),
+              loadOp: "clear",
+              clearValue: [...clearColor],
+              storeOp: "store",
+            },
+          ],
+          depthStencilAttachment: {
+            view: depthTextureView,
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+
+        for (const {
+          vertexBuffer,
+          indexBuffer,
+          indexLength,
+          uniformBindGroup,
+          wireframe,
+        } of buffers) {
+          // 線で描画するオブジェクトは別のパイプラインを使用
+          const pipeline = wireframe ? linePipeline : trianglePipeline;
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, uniformBindGroup);
+          pass.setVertexBuffer(0, vertexBuffer);
+          pass.setIndexBuffer(indexBuffer, "uint16");
+          pass.drawIndexed(indexLength, objects.length); // 第一引数: インデックス数、第二引数: インスタンス数
+        }
+
+        pass.end();
+        device.queue.submit([commandEncoder.finish()]);
+      }
+
+      function autoResizeCanvas(canvas) {
+        const expandFullScreen = () => {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          if (device && context) {
+            context.configure({
+              device: device,
+              format: canvasFormat,
+              size: { width: canvas.width, height: canvas.height },
+            });
+
+            // 深度ステンシルバッファを再作成してサイズを更新
+            const depthTexture = device.createTexture({
+              size: [canvas.width, canvas.height, 1],
+              format: "depth24plus",
+              usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+            depthTextureView = depthTexture.createView();
+
+            updateProjectionMatrix();
+          }
+        };
+
+        expandFullScreen();
+        window.addEventListener("resize", expandFullScreen);
+      }
+
+      // リサイズ時に再設定するためのプロジェクションマトリックスを更新
+      function updateProjectionMatrix() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = 0.1;
+        const far = 1000;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        // 各オブジェクトのユニフォームバッファにプロジェクションマトリックスを再設定
+        objects.forEach((object, i) => {
+          const uniformBuffer = buffers[i].uniformBuffer;
+          const bindGroupSize = buffers[i].bindGroupSize;
+          device.queue.writeBuffer(
+            uniformBuffer,
+            0,
+            projectionMatrix.buffer,
+            projectionMatrix.byteOffset,
+            MAT4_SIZE
+          );
+        });
+      }
+
+      function getObject(alias) {
+        return objects.find((object) => object.alias === alias);
+      }
+
+      function initControls() {
+        const gui = new dat.GUI();
+        const coordinatesElement = document.getElementById("coordinates");
+
+        const settings = {
+          Coordinates: coordinates,
+          TranslateX: home[0],
+          TranslateY: home[1],
+          TranslateZ: home[2],
+        };
+
+        gui
+          .add(settings, "Coordinates", [WORLD_COORDINATES, CAMERA_COORDINATES])
+          .onChange((value) => {
+            coordinates = value;
+            coordinatesElement.innerText = coordinates;
+            vec3.copy(home, position);
+            rotation = [0, 0, 0];
+            if (coordinates === CAMERA_COORDINATES) {
+              vec3.negate(position, position);
+            }
+            updateUniforms();
+            draw();
+          });
+
+        gui.add(settings, "TranslateX", -100, 100, 0.1).onChange((value) => {
+          position[0] = value;
+          updateUniforms();
+          draw();
+        });
+
+        gui.add(settings, "TranslateY", -100, 100, 0.1).onChange((value) => {
+          position[1] = value;
+          updateUniforms();
+          draw();
+        });
+
+        gui.add(settings, "TranslateZ", -100, 100, 0.1).onChange((value) => {
+          position[2] = value;
+          updateUniforms();
+          draw();
+        });
+
+        clock.on("tick", () => {
+          const matrix =
+            coordinates === WORLD_COORDINATES ? modelViewMatrix : cameraMatrix;
+          matrix.forEach((data, i) => {
+            document.getElementById(`m${i}`).innerText = data.toFixed(1);
+          });
+        });
+      }
+
+      function releaseResources() {
+        buffers.forEach(({ vertexBuffer, indexBuffer, uniformBuffer }) => {
+          vertexBuffer.destroy();
+          indexBuffer.destroy();
+          uniformBuffer.destroy();
+        });
+      }
+
+      window.onload = init;
+      window.addEventListener("unload", releaseResources);
+    </script>
+  </head>
+  <body>
+    <canvas id="webgpu-canvas">
+      Your browser does not support the HTML5 canvas element.
+    </canvas>
+
+    <div id="info">
+      <p id="coordinates">World Coordinates</p>
+      <table id="matrix">
+        <tr>
+          <td id="m0"></td>
+          <td id="m4"></td>
+          <td id="m8"></td>
+          <td id="m12"></td>
+        </tr>
+        <tr>
+          <td id="m1"></td>
+          <td id="m5"></td>
+          <td id="m9"></td>
+          <td id="m13"></td>
+        </tr>
+        <tr>
+          <td id="m2"></td>
+          <td id="m6"></td>
+          <td id="m10"></td>
+          <td id="m14"></td>
+        </tr>
+        <tr>
+          <td id="m3"></td>
+          <td id="m7"></td>
+          <td id="m11"></td>
+          <td id="m15"></td>
+        </tr>
+      </table>
+    </div>
+  </body>
+</html>
