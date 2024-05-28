@@ -272,4 +272,13 @@ const utils = {
 
     return ts;
   },
+
+  // バッファの解放
+  releaseResources(buffers) {
+    buffers.forEach(({ vertexBuffer, indexBuffer, uniformBuffer }) => {
+      vertexBuffer.destroy();
+      indexBuffer.destroy();
+      uniformBuffer.destroy();
+    });
+  },
 };
