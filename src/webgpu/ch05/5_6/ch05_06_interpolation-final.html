@@ -1,0 +1,933 @@
+<html>
+  <head>
+    <title>Real-Time 3D Graphics with WebGPU</title>
+    <link rel="stylesheet" href="../../common/lib/normalize.css" />
+    <script type="text/javascript" src="../../common/js/utils.js"></script>
+    <script type="text/javascript" src="../../common/lib/dat.gui.js"></script>
+    <script type="text/javascript" src="../../common/js/Axis.js"></script>
+    <script type="text/javascript" src="../../common/js/Floor.js"></script>
+    <script
+      type="text/javascript"
+      src="../../common/js/EventEmitter.js"
+    ></script>
+    <script type="text/javascript" src="../../common/js/Clock.js"></script>
+    <script type="text/javascript" src="../../common/js/Controls.js"></script>
+    <script type="module" src="../../common/js/Camera.js"></script>
+    <script type="module">
+      ("use strict");
+      import {
+        vec3,
+        mat4,
+      } from "https://wgpu-matrix.org/dist/1.x/wgpu-matrix.module.js";
+      import Camera from "../../common/js/Camera.js";
+
+      const FLOAT_SIZE = 4,
+        MAT4_SIZE = 16 * FLOAT_SIZE,
+        VEC3_SIZE = 3 * FLOAT_SIZE,
+        VEC4_SIZE = 4 * FLOAT_SIZE,
+        VEC3_PADDING = 4,
+        degToRad = (d) => (d * Math.PI) / 180;
+
+      let canvas,
+        device,
+        context,
+        canvasFormat,
+        camera,
+        trianglePipeline,
+        linePipeline,
+        objects = [],
+        buffers = [],
+        depthTextureView,
+        lightPosition = vec3.fromValues(0, 120, 120),
+        lightAmbient = vec3.fromValues(0.2, 0.2, 0.2),
+        lightDiffuse = vec3.fromValues(1, 1, 1),
+        lightSpecular = vec3.fromValues(1, 1, 1),
+        shininess = 230,
+        materialDiffuse = vec3.fromValues(1, 1, 1),
+        materialAmbient = vec3.fromValues(0.2, 0.2, 0.2),
+        materialSpecular = vec3.fromValues(1, 1, 1),
+        clearColor = [0.9, 0.9, 0.9, 1.0],
+        modelViewMatrix = mat4.create(),
+        normalMatrix = mat4.create(),
+        fixedLight = false,
+        sceneTime = 0,
+        position = [],
+        incrementSteps = 1000,
+        ballColor = [1, 1, 0, 1],
+        flagStartColor = [0, 1, 0, 1],
+        flagEndColor = [0, 0, 1, 1],
+        flagColor = [0.5, 0.5, 0.5, 1],
+        flagColorHighlight = [1, 0, 0, 1],
+        zDimension = 150,
+        linearInterpolation = "Linear Interpolation",
+        polynomialInterpolation = "Polynomial Interpolation",
+        bSplineInterpolation = "B-Spline Interpolation",
+        interpolationType = linearInterpolation,
+        controlPoints = [
+          [-25, 0, 20],
+          [-40, 0, -10],
+          [0, 0, 10],
+          [25, 0, -5],
+          [40, 0, -20],
+        ];
+
+      async function init() {
+        canvas = setupCanvas();
+        await setupWebGPU(canvas);
+        setupCamera();
+        await loadObjects();
+        interpolate();
+        await setupShadersAndPipeline();
+        setupBuffers();
+        render();
+        initControls();
+      }
+
+      function setupCanvas() {
+        canvas = utils.getCanvas("webgpu-canvas");
+        autoResizeCanvas(canvas);
+        return canvas;
+      }
+
+      async function setupWebGPU(canvas) {
+        if (!navigator.gpu) {
+          throw new Error("WebGPU not supported on this browser.");
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          throw new Error("No appropriate GPUAdapter found.");
+        }
+        device = await adapter.requestDevice();
+        context = utils.getGPUContext(canvas);
+        canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+          device: device,
+          format: canvasFormat,
+        });
+      }
+
+      function setupCamera() {
+        camera = new Camera(Camera.ORBITING_TYPE);
+        camera.goHome([0, 2, 100]);
+        camera.setElevation(-20);
+        new Controls(camera, canvas);
+      }
+
+      async function setupShadersAndPipeline() {
+        const vertexShaderModule = device.createShaderModule({
+          code: await fetch("./vertexShader.wgsl").then((res) => res.text()),
+        });
+
+        const fragmentShaderModule = device.createShaderModule({
+          code: await fetch("./fragmentShader.wgsl").then((res) => res.text()),
+        });
+
+        const vertexBufferLayout = {
+          arrayStride: 6 * Float32Array.BYTES_PER_ELEMENT,
+          attributes: [
+            // position
+            {
+              format: "float32x3",
+              offset: 0,
+              shaderLocation: 0,
+            },
+            // normal
+            {
+              format: "float32x3",
+              offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+              shaderLocation: 1,
+            },
+          ],
+        };
+
+        const uniformBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+              buffer: {
+                type: "uniform",
+              },
+            },
+          ],
+        });
+
+        trianglePipeline = device.createRenderPipeline({
+          label: "Triangle pipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [
+              {
+                format: canvasFormat,
+                // 透明にするための設定を追加
+                blend: {
+                  color: {
+                    srcFactor: "src-alpha",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                  alpha: {
+                    srcFactor: "one",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                },
+              },
+            ],
+          },
+          primitive: {
+            topology: "triangle-list",
+            cullMode: "none",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: true,
+            depthCompare: "less-equal",
+          },
+        });
+
+        linePipeline = device.createRenderPipeline({
+          label: "Line pipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [{ format: canvasFormat }],
+          },
+          primitive: {
+            topology: "line-list",
+            cullMode: "none",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: true,
+            depthCompare: "less-equal",
+          },
+        });
+      }
+
+      async function loadObjects() {
+        const objectPromises = [
+          addObject(new Floor(zDimension, 2)),
+          addObject(new Axis(zDimension)),
+          loadObject("../../common/models/geometries/ball.json", "ball", {
+            diffuse: ballColor,
+          }),
+          loadObject("../../common/models/geometries/flag.json", "flagStart", {
+            diffuse: flagStartColor,
+          }),
+          loadObject("../../common/models/geometries/flag.json", "flagEnd", {
+            diffuse: flagEndColor,
+          }),
+          loadObject("../../common/models/geometries/flag.json", "flag1", {
+            diffuse: flagColor,
+          }),
+          loadObject("../../common/models/geometries/flag.json", "flag2", {
+            diffuse: flagColor,
+          }),
+          loadObject("../../common/models/geometries/flag.json", "flag3", {
+            diffuse: flagColor,
+          }),
+        ];
+
+        await Promise.all(objectPromises)
+          .then(() => {
+            console.log("All objects loaded:", objects);
+          })
+          .catch((error) => {
+            console.error("Error loading objects:", error);
+          });
+      }
+
+      function addObject(data) {
+        objects.push(data);
+      }
+
+      function loadObject(filePath, alias, attributes) {
+        return fetch(filePath)
+          .then((res) => res.json())
+          .then((data) => {
+            data.alias = alias;
+            data.diffuse = attributes.diffuse;
+            objects.push(data);
+          });
+      }
+
+      function setupBuffers() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = camera.minZ;
+        const far = camera.maxZ;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        const SUM_MAT4_SIZE = 3 * MAT4_SIZE;
+        const SUM_VEC4_SIZE = 1 * VEC4_SIZE;
+        const SUM_VEC3_SIZE = 7 * (VEC3_SIZE + VEC3_PADDING);
+        const SUM_FLOAT32_SIZE = 3 * FLOAT_SIZE + 4; // 4: パディング
+
+        const alignedSize =
+          SUM_MAT4_SIZE + SUM_VEC4_SIZE + SUM_VEC3_SIZE + SUM_FLOAT32_SIZE;
+
+        objects.forEach((object, i) => {
+          modelViewMatrix = camera.getViewTransform();
+
+          normalMatrix = mat4.inverse(modelViewMatrix);
+          mat4.transpose(normalMatrix, normalMatrix);
+          const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+          let offset = 0;
+
+          // ローカル変換行列を設定
+          const { alias } = object;
+          if (alias === "ball" && position[sceneTime]) {
+            mat4.translate(
+              modelViewMatrix,
+              position[sceneTime],
+              modelViewMatrix
+            );
+          } else if (alias === "flagStart") {
+            mat4.translate(modelViewMatrix, controlPoints[0], modelViewMatrix);
+          } else if (alias === "flagEnd") {
+            mat4.translate(modelViewMatrix, controlPoints[4], modelViewMatrix);
+          } else if (alias === "flag1") {
+            if (interpolationType !== linearInterpolation) {
+              mat4.translate(
+                modelViewMatrix,
+                controlPoints[1],
+                modelViewMatrix
+              );
+              object.diffuse = close(controlPoints[1], position[sceneTime], 3)
+                ? flagColorHighlight
+                : flagColor;
+            } else {
+              object.diffuse = [0, 0, 0, 0]; // 透明にする
+            }
+          } else if (alias === "flag2") {
+            if (interpolationType !== linearInterpolation) {
+              mat4.translate(
+                modelViewMatrix,
+                controlPoints[2],
+                modelViewMatrix
+              );
+              object.diffuse = close(controlPoints[2], position[sceneTime], 3)
+                ? flagColorHighlight
+                : flagColor;
+            } else {
+              object.diffuse = [0, 0, 0, 0];
+            }
+          } else if (alias === "flag3") {
+            if (interpolationType !== linearInterpolation) {
+              mat4.translate(
+                modelViewMatrix,
+                controlPoints[3],
+                modelViewMatrix
+              );
+              object.diffuse = close(controlPoints[3], position[sceneTime], 3)
+                ? flagColorHighlight
+                : flagColor;
+            } else {
+              object.diffuse = [0, 0, 0, 0];
+            }
+          }
+
+          uniformData.set(projectionMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(modelViewMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(normalMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightPosition, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightDiffuse, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightAmbient, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightSpecular, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.diffuse ?? materialDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.ambient ?? materialAmbient, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.specular ?? materialSpecular, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData[offset] = shininess;
+          offset += 1;
+
+          uniformData[offset] = object.wireframe ? 1 : 0;
+          offset += 1;
+
+          uniformData[offset] = fixedLight ? 1 : 0;
+          offset += 1;
+
+          const uniformBuffer = device.createBuffer({
+            label: "Uniform Buffer",
+            size: uniformData.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Uniform Bind Group",
+            layout: object.wireframe
+              ? linePipeline.getBindGroupLayout(0)
+              : trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: uniformData.byteLength,
+                },
+              },
+            ],
+          });
+
+          const vertices = object.vertices;
+          let indices = new Uint16Array(object.indices);
+          const normals = utils.createNormals(vertices, indices);
+          const vertexData = [];
+
+          for (let i = 0; i < vertices.length; i += 3) {
+            vertexData.push(vertices[i], vertices[i + 1], vertices[i + 2]); // position
+            vertexData.push(normals[i], normals[i + 1], normals[i + 2]); // normal
+          }
+          const vertexDataFloat32Array = new Float32Array(vertexData);
+
+          const vertexBuffer = device.createBuffer({
+            label: "Vertex With Normals Buffer",
+            size: vertexDataFloat32Array.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(vertexBuffer, 0, vertexDataFloat32Array);
+
+          // インデックスを4の倍数にパディングしないとエラーが発生する
+          indices = utils.padUint16ArrayToMultipleOf4(indices);
+
+          const indexBuffer = device.createBuffer({
+            label: "Index Buffer",
+            size: indices.byteLength,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(indexBuffer, 0, indices);
+
+          buffers.push({
+            vertexBuffer: vertexBuffer,
+            indexBuffer: indexBuffer,
+            indexLength: indices.length,
+            uniformBindGroup: uniformBindGroup,
+            uniformBuffer: uniformBuffer,
+            bindGroupSize: uniformData.byteLength,
+            wireframe: object.wireframe,
+          });
+        });
+
+        const depthTexture = device.createTexture({
+          size: [canvas.width, canvas.height, 1],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        depthTextureView = depthTexture.createView();
+      }
+
+      function updateUniforms() {
+        const SUM_MAT4_SIZE = 2 * MAT4_SIZE;
+        const SUM_VEC3_SIZE = 7 * (VEC3_SIZE + VEC3_PADDING);
+        const SUM_FLOAT32_SIZE = 3 * FLOAT_SIZE + 4; // 4: パディング
+
+        const alignedSize = SUM_MAT4_SIZE + SUM_VEC3_SIZE + SUM_FLOAT32_SIZE;
+
+        objects.forEach((object, i) => {
+          modelViewMatrix = camera.getViewTransform();
+
+          normalMatrix = mat4.inverse(modelViewMatrix);
+          mat4.transpose(normalMatrix, normalMatrix);
+
+          const { alias } = object;
+          if (alias === "ball" && position[sceneTime]) {
+            mat4.translate(
+              modelViewMatrix,
+              position[sceneTime],
+              modelViewMatrix
+            );
+          } else if (alias === "flagStart") {
+            mat4.translate(modelViewMatrix, controlPoints[0], modelViewMatrix);
+          } else if (alias === "flagEnd") {
+            mat4.translate(modelViewMatrix, controlPoints[4], modelViewMatrix);
+          } else if (alias === "flag1") {
+            if (interpolationType !== linearInterpolation) {
+              mat4.translate(
+                modelViewMatrix,
+                controlPoints[1],
+                modelViewMatrix
+              );
+              object.diffuse = close(controlPoints[1], position[sceneTime], 3)
+                ? flagColorHighlight
+                : flagColor;
+            } else {
+              object.diffuse = [0, 0, 0, 0];
+            }
+          } else if (alias === "flag2") {
+            if (interpolationType !== linearInterpolation) {
+              mat4.translate(
+                modelViewMatrix,
+                controlPoints[2],
+                modelViewMatrix
+              );
+              object.diffuse = close(controlPoints[2], position[sceneTime], 3)
+                ? flagColorHighlight
+                : flagColor;
+            } else {
+              object.diffuse = [0, 0, 0, 0];
+            }
+          } else if (alias === "flag3") {
+            if (interpolationType !== linearInterpolation) {
+              mat4.translate(
+                modelViewMatrix,
+                controlPoints[3],
+                modelViewMatrix
+              );
+              object.diffuse = close(controlPoints[3], position[sceneTime], 3)
+                ? flagColorHighlight
+                : flagColor;
+            } else {
+              object.diffuse = [0, 0, 0, 0];
+            }
+          }
+
+          const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+          let offset = 0;
+
+          uniformData.set(modelViewMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(normalMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightPosition, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightDiffuse, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightAmbient, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightSpecular, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.diffuse ?? materialDiffuse, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.ambient ?? materialAmbient, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(object.specular ?? materialSpecular, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE; // 次の要素が4バイトなのでパディングを入れた場合、シェーダー側でもパディングを考慮する必要がある
+
+          uniformData[offset] = shininess;
+          offset += 1;
+
+          uniformData[offset] = object.wireframe ? 1 : 0;
+          offset += 1;
+
+          uniformData[offset] = fixedLight ? 1 : 0;
+          offset += 1;
+
+          const uniformBuffer = buffers[i].uniformBuffer;
+          const bindGroupSize = buffers[i].bindGroupSize;
+          device.queue.writeBuffer(
+            uniformBuffer,
+            MAT4_SIZE,
+            uniformData.buffer,
+            uniformData.byteOffset,
+            alignedSize
+          );
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Update Uniform Bind Group",
+            layout: object.wireframe
+              ? linePipeline.getBindGroupLayout(0)
+              : trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: bindGroupSize,
+                },
+              },
+            ],
+          });
+
+          buffers[i].uniformBindGroup = uniformBindGroup;
+        });
+      }
+
+      async function draw() {
+        const commandEncoder = device.createCommandEncoder();
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: context.getCurrentTexture().createView(),
+              loadOp: "clear",
+              clearValue: [...clearColor],
+              storeOp: "store",
+            },
+          ],
+          depthStencilAttachment: {
+            view: depthTextureView,
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+
+        for (const {
+          vertexBuffer,
+          indexBuffer,
+          indexLength,
+          uniformBindGroup,
+          wireframe,
+        } of buffers) {
+          const pipeline = wireframe ? linePipeline : trianglePipeline;
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, uniformBindGroup);
+          pass.setVertexBuffer(0, vertexBuffer);
+          pass.setIndexBuffer(indexBuffer, "uint16");
+          pass.drawIndexed(indexLength, objects.length);
+        }
+
+        pass.end();
+        device.queue.submit([commandEncoder.finish()]);
+      }
+
+      function close(c1, c0, r) {
+        return (
+          Math.sqrt(
+            (c1[0] - c0[0]) * (c1[0] - c0[0]) +
+              (c1[1] - c0[1]) * (c1[1] - c0[1]) +
+              (c1[2] - c0[2]) * (c1[2] - c0[2])
+          ) <= r
+        );
+      }
+
+      function doLinearInterpolation() {
+        position = [];
+        const [X0, Y0, Z0] = controlPoints[0];
+        const [X1, Y1, Z1] = controlPoints[controlPoints.length - 1];
+
+        for (let i = 0; i < incrementSteps; i++) {
+          const s = i / incrementSteps;
+          position.push([
+            X0 * (1 - s) + X1 * s,
+            Y0 * (1 - s) + Y1 * s,
+            Z0 * (1 - s) + Z1 * s,
+          ]);
+        }
+      }
+
+      function doLagrangeInterpolation() {
+        position = [];
+
+        const N = controlPoints.length;
+        const dT = incrementSteps / (N - 1);
+        const D = [];
+
+        for (let i = 0; i < N; i++) {
+          D[i] = 1;
+          for (let j = 0; j < N; j++) {
+            if (i === j) continue;
+            D[i] *= dT * (i - j);
+          }
+        }
+
+        function Lk(x, axis) {
+          const R = [];
+
+          let S = 0;
+          for (let i = 0; i < N; i++) {
+            R[i] = 1;
+            for (let j = 0; j < N; j++) {
+              if (i === j) continue;
+              R[i] *= x - j * dT;
+            }
+            R[i] /= D[i];
+            S += R[i] * controlPoints[i][axis];
+          }
+
+          return S;
+        }
+
+        for (let k = 0; k < incrementSteps; k++) {
+          position.push([Lk(k, 0), Lk(k, 1), Lk(k, 2)]);
+        }
+      }
+
+      function doBSplineInterpolation() {
+        position = [];
+
+        const N = controlPoints.length - 1;
+        const P = 3;
+        const U = [];
+        const M = N + P + 1;
+        const deltaKnot = 1 / (M - 2 * P);
+
+        for (let i = 0; i <= P; i++) {
+          U.push(0);
+        }
+
+        let v = deltaKnot;
+        for (let i = P + 1; i < M - P + 1; i++) {
+          U.push(v);
+          v += deltaKnot;
+        }
+
+        for (let i = M - P + 1; i <= M; i++) {
+          U.push(1);
+        }
+
+        function No(u, i) {
+          return U[i] <= u && u < U[i + 1] ? 1 : 0;
+        }
+
+        function Np(u, i, p) {
+          let A = 0,
+            B = 0;
+
+          if (p - 1 === 0) {
+            A = No(u, i);
+            B = No(u, i + 1);
+          } else {
+            A = Np(u, i, p - 1);
+            B = Np(u, i + 1, p - 1);
+          }
+
+          let coefficientA = 0,
+            coefficientB = 0;
+
+          if (U[i + p] - U[i] !== 0) {
+            coefficientA = (u - U[i]) / (U[i + p] - U[i]);
+          }
+          if (U[i + p + 1] - U[i + 1] !== 0) {
+            coefficientB = (U[i + p + 1] - u) / (U[i + p + 1] - U[i + 1]);
+          }
+
+          return coefficientA * A + coefficientB * B;
+        }
+
+        function C(t) {
+          const result = [];
+
+          for (let j = 0; j < 3; j++) {
+            let sum = 0;
+            for (let i = 0; i <= N; i++) {
+              sum += controlPoints[i][j] * Np(t, i, P);
+            }
+            result[j] = sum;
+          }
+
+          return result;
+        }
+
+        const dT = 1 / incrementSteps;
+
+        let t = 0;
+        do {
+          position.push(C(t));
+          t += dT;
+        } while (t < 1.0);
+
+        position.push(C(1.0));
+      }
+
+      function interpolate() {
+        const interpolate = {
+          [linearInterpolation]: doLinearInterpolation,
+          [polynomialInterpolation]: doLagrangeInterpolation,
+          [bSplineInterpolation]: doBSplineInterpolation,
+        }[interpolationType];
+        interpolate && interpolate();
+      }
+
+      function animate() {
+        sceneTime += 1;
+        if (sceneTime === incrementSteps) sceneTime = 0;
+        updateUniforms();
+        draw();
+      }
+
+      function resetAnimation() {
+        sceneTime = 0;
+        position.length = 0;
+      }
+
+      function render() {
+        draw();
+        setInterval(animate, 30 / 1000);
+      }
+
+      function autoResizeCanvas(canvas) {
+        const expandFullScreen = () => {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          if (device && context) {
+            context.configure({
+              device: device,
+              format: canvasFormat,
+              size: { width: canvas.width, height: canvas.height },
+            });
+
+            // 深度ステンシルバッファを再作成してサイズを更新
+            const depthTexture = device.createTexture({
+              size: [canvas.width, canvas.height, 1],
+              format: "depth24plus",
+              usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+            depthTextureView = depthTexture.createView();
+
+            updateProjectionMatrix();
+          }
+        };
+
+        expandFullScreen();
+        window.addEventListener("resize", expandFullScreen);
+      }
+
+      // リサイズ時に再設定するためのプロジェクションマトリックスを更新
+      function updateProjectionMatrix() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = 0.1;
+        const far = 1000;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        // 各オブジェクトのユニフォームバッファにプロジェクションマトリックスを再設定
+        objects.forEach((_, i) => {
+          const uniformBuffer = buffers[i].uniformBuffer;
+          device.queue.writeBuffer(
+            uniformBuffer,
+            0,
+            projectionMatrix.buffer,
+            projectionMatrix.byteOffset,
+            MAT4_SIZE
+          );
+        });
+      }
+
+      function initControls() {
+        utils.configureControls({
+          "Camera Type": {
+            value: camera.type,
+            options: [Camera.ORBITING_TYPE, Camera.TRACKING_TYPE],
+            onChange: (v) => {
+              camera.goHome();
+              camera.setType(v);
+            },
+          },
+          Points: [0, 1, 2, 3, 4].reduce((result, i) => {
+            result[`Point ${i + 1}`] = {
+              value: controlPoints[i][0],
+              min: -70,
+              max: 70,
+              step: 1,
+              onChange: (v) => {
+                controlPoints[i][0] = v;
+                interpolate();
+              },
+            };
+            return result;
+          }, {}),
+          Interpolation: {
+            value: interpolationType,
+            options: [
+              linearInterpolation,
+              polynomialInterpolation,
+              bSplineInterpolation,
+            ],
+            onChange: (v) => {
+              resetAnimation();
+              interpolationType = v;
+              if (interpolationType === linearInterpolation) {
+                controlPoints = [
+                  [-25, 0, 20],
+                  [-40, 0, -10],
+                  [0, 0, 10],
+                  [25, 0, -5],
+                  [40, 0, -20],
+                ];
+                incrementSteps = 1000;
+              } else if (interpolationType === polynomialInterpolation) {
+                controlPoints = [
+                  [21, 0, 23],
+                  [-3, 0, -10],
+                  [-21, 0, -53],
+                  [50, 0, -31],
+                  [-24, 0, 2],
+                ];
+                incrementSteps = 1355;
+              } else if (interpolationType === bSplineInterpolation) {
+                controlPoints = [
+                  [-21, 0, 23],
+                  [32, 0, -10],
+                  [0, 0, -53],
+                  [-32, 0, -10],
+                  [21, 0, 23],
+                ];
+                incrementSteps = 1000;
+              }
+              interpolate();
+            },
+          },
+          "Interpolation Steps": {
+            value: incrementSteps,
+            min: 10,
+            max: 1500,
+            step: 1,
+            onChange: (v) => {
+              incrementSteps = v;
+              interpolate();
+            },
+          },
+          "Static Light Position": {
+            value: fixedLight,
+            onChange: (v) => (fixedLight = v),
+          },
+          "Go Home": () => camera.goHome(),
+        });
+      }
+
+      window.onload = init;
+      window.addEventListener("unload", utils.releaseResources(buffers));
+    </script>
+  </head>
+  <body>
+    <canvas id="webgpu-canvas">
+      Your browser does not support the HTML5 canvas element.
+    </canvas>
+  </body>
+</html>
