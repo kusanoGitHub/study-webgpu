@@ -1,0 +1,792 @@
+<!-- 
+  ブレンド別の見た目
+  see: https://webgpufundamentals.org/webgpu/lessons/webgpu-transparency.html
+ -->
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Real-Time 3D Graphics with WebGPU</title>
+    <link rel="stylesheet" href="../../common/lib/normalize.css" />
+    <script type="text/javascript" src="../../common/js/utils.js"></script>
+    <script type="text/javascript" src="../../common/lib/dat.gui.js"></script>
+    <script
+      type="text/javascript"
+      src="../../common/js/EventEmitter.js"
+    ></script>
+    <script type="text/javascript" src="../../common/js/Clock.js"></script>
+    <script type="text/javascript" src="../../common/js/Controls.js"></script>
+    <script type="module" src="../../common/js/Camera.js"></script>
+    <script type="text/javascript" src="../../common/js/Floor.js"></script>
+    <script type="module">
+      ("use strict");
+      import {
+        vec3,
+        vec4,
+        mat4,
+      } from "https://wgpu-matrix.org/dist/1.x/wgpu-matrix.module.js";
+      import Camera from "../../common/js/Camera.js";
+
+      const FLOAT_SIZE = 4,
+        MAT4_SIZE = 16 * FLOAT_SIZE,
+        VEC3_SIZE = 3 * FLOAT_SIZE,
+        VEC4_SIZE = 4 * FLOAT_SIZE,
+        FLOAT32_SIZE = 1 * FLOAT_SIZE,
+        VEC3_PADDING = 4,
+        degToRad = (d) => (d * Math.PI) / 180;
+
+      let canvas,
+        device,
+        context,
+        canvasFormat,
+        camera,
+        trianglePipeline,
+        linePipeline,
+        objects = [],
+        buffers = [],
+        depthTextureView,
+        lightPosition = vec3.fromValues(0, 5, 20),
+        lightAmbient = vec4.fromValues(1, 1, 1, 1),
+        lightDiffuse = vec4.fromValues(1, 1, 1, 1),
+        materialDiffuse = vec4.fromValues(1, 1, 1, 1),
+        materialAmbient = vec4.fromValues(0, 0, 0, 1),
+        colorBlendingSource = "src-alpha",
+        colorBlendingTarget = "one-minus-src-alpha",
+        colorBlendingEquation = "add",
+        alphaBlendingSource = "src-alpha",
+        alphaBlendingTarget = "one-minus-src-alpha",
+        alphaBlendingEquation = "add",
+        blending = true,
+        depthTest = true,
+        culling = true,
+        lambert = true,
+        floor = true,
+        coneColor = [0, 1, 1, 1],
+        sphereColor = [0.7, 0, 0.7, 1],
+        blendingColor = [0, 1, 0],
+        blendingAlpha = 1,
+        useLambert = true;
+
+      async function init() {
+        canvas = setupCanvas();
+        await setupWebGPU(canvas);
+        setupCamera();
+        await loadObjects();
+        await setupShadersAndPipeline();
+        setupBuffers();
+        render();
+        initControls();
+      }
+
+      function setupCanvas() {
+        canvas = utils.getCanvas("webgpu-canvas");
+        autoResizeCanvas(canvas);
+        return canvas;
+      }
+
+      async function setupWebGPU(canvas) {
+        if (!navigator.gpu) {
+          throw new Error("WebGPU not supported on this browser.");
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          throw new Error("No appropriate GPUAdapter found.");
+        }
+        device = await adapter.requestDevice();
+        context = utils.getGPUContext(canvas);
+        canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+          device: device,
+          format: canvasFormat,
+        });
+      }
+
+      function setupCamera() {
+        camera = new Camera(Camera.ORBITING_TYPE);
+        camera.goHome([0, 5, 35]);
+        camera.setFocus([0, 0, 0]);
+        camera.setAzimuth(25);
+        camera.setElevation(-25);
+        new Controls(camera, canvas);
+      }
+
+      async function setupShadersAndPipeline() {
+        const vertexShaderModule = device.createShaderModule({
+          code: await fetch("./vertexShader.wgsl").then((res) => res.text()),
+        });
+
+        const fragmentShaderModule = device.createShaderModule({
+          code: await fetch("./fragmentShader.wgsl").then((res) => res.text()),
+        });
+
+        const vertexBufferLayout = {
+          arrayStride: 6 * Float32Array.BYTES_PER_ELEMENT, // vec3 + vec3
+          attributes: [
+            // position
+            {
+              format: "float32x3",
+              offset: 0,
+              shaderLocation: 0,
+            },
+            // normal
+            {
+              format: "float32x3",
+              offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+              shaderLocation: 1,
+            },
+          ],
+        };
+
+        const uniformBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+              buffer: {
+                type: "uniform",
+              },
+            },
+          ],
+        });
+
+        trianglePipeline = device.createRenderPipeline({
+          label: "Triangle pipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [
+              {
+                format: canvasFormat,
+                blend: {
+                  color: {
+                    srcFactor: colorBlendingSource,
+                    dstFactor: colorBlendingTarget,
+                    operation: colorBlendingEquation,
+                  },
+                  alpha: {
+                    srcFactor: alphaBlendingSource,
+                    dstFactor: alphaBlendingTarget,
+                    operation: alphaBlendingEquation,
+                  },
+                },
+              },
+            ],
+          },
+          primitive: {
+            topology: "triangle-list",
+            cullMode: culling ? "back" : "none",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: depthTest,
+            depthCompare: depthTest ? "less" : "always",
+          },
+        });
+
+        linePipeline = device.createRenderPipeline({
+          label: "Line pipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [
+              {
+                format: canvasFormat,
+                blend: {
+                  color: {
+                    srcFactor: colorBlendingSource,
+                    dstFactor: colorBlendingTarget,
+                    operation: colorBlendingEquation,
+                  },
+                  alpha: {
+                    srcFactor: alphaBlendingSource,
+                    dstFactor: alphaBlendingTarget,
+                    operation: alphaBlendingEquation,
+                  },
+                },
+              },
+            ],
+          },
+          primitive: {
+            topology: "line-list",
+            cullMode: culling ? "back" : "none",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: depthTest,
+            depthCompare: depthTest ? "less" : "always",
+          },
+        });
+      }
+
+      async function loadObjects() {
+        const objectPromises = [
+          addObject(new Floor(80, 2)),
+          loadObject("../../common/models/geometries/cone3.json", "cone", {
+            diffuse: coneColor,
+          }),
+          loadObject("../../common/models/geometries/sphere2.json", "sphere", {
+            diffuse: sphereColor,
+          }),
+        ];
+
+        await Promise.all(objectPromises)
+          .then(() => {
+            console.log("All objects loaded:", objects);
+          })
+          .catch((error) => {
+            console.error("Error loading objects:", error);
+          });
+      }
+
+      function addObject(data) {
+        objects.push(data);
+      }
+
+      function loadObject(filePath, alias, option) {
+        return fetch(filePath)
+          .then((res) => res.json())
+          .then((data) => {
+            data.alias = alias;
+            data.diffuse = option.diffuse;
+            objects.push(data);
+          });
+      }
+
+      function setupBuffers() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = camera.minZ;
+        const far = camera.maxZ;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        const uniformBufferSize =
+          3 * MAT4_SIZE +
+          4 * VEC4_SIZE +
+          1 * (VEC3_SIZE + VEC3_PADDING) +
+          2 * FLOAT32_SIZE +
+          8; // 8: padding
+
+        objects.forEach((object, i) => {
+          const modelViewMatrix = camera.getViewTransform();
+
+          const normalMatrix = mat4.inverse(modelViewMatrix);
+          mat4.transpose(normalMatrix, normalMatrix);
+
+          const uniformData = new Float32Array(uniformBufferSize / FLOAT_SIZE);
+
+          let offset = 0;
+
+          uniformData.set(projectionMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(modelViewMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(normalMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.ambient ?? materialAmbient, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.diffuse ?? materialDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightAmbient, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightPosition, offset);
+          offset += VEC3_SIZE / FLOAT_SIZE;
+
+          uniformData[offset] = object.wireframe ? 1 : 0;
+          offset += FLOAT32_SIZE / FLOAT_SIZE;
+
+          uniformData[offset] = useLambert ? 1 : 0;
+          offset += FLOAT32_SIZE / FLOAT_SIZE;
+          offset += 3; // padding
+
+          const uniformBuffer = device.createBuffer({
+            label: "Uniform Buffer",
+            size: uniformData.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Uniform Bind Group",
+            layout: object.wireframe
+              ? linePipeline.getBindGroupLayout(0)
+              : trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: uniformData.byteLength,
+                },
+              },
+            ],
+          });
+
+          const vertices = object.vertices;
+          let indices = new Uint16Array(object.indices);
+          const normals = utils.createNormals(vertices, indices);
+          const vertexData = [];
+
+          for (let i = 0; i < vertices.length; i += 3) {
+            vertexData.push(vertices[i], vertices[i + 1], vertices[i + 2]); // position
+            vertexData.push(normals[i], normals[i + 1], normals[i + 2]); // normal
+          }
+          const vertexDataFloat32Array = new Float32Array(vertexData);
+
+          const vertexBuffer = device.createBuffer({
+            label: "Vertex With Normals Buffer",
+            size: vertexDataFloat32Array.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(vertexBuffer, 0, vertexDataFloat32Array);
+
+          indices = utils.padUint16ArrayToMultipleOf4(indices);
+
+          const indexBuffer = device.createBuffer({
+            label: "Index Buffer",
+            size: indices.byteLength,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(indexBuffer, 0, indices);
+
+          buffers.push({
+            vertexBuffer: vertexBuffer,
+            indexBuffer: indexBuffer,
+            indexLength: indices.length,
+            uniformBindGroup: uniformBindGroup,
+            wireframe: object.wireframe,
+            uniformBuffer: uniformBuffer,
+            uniformBindSize: uniformData.byteLength,
+          });
+        });
+
+        const depthTexture = device.createTexture({
+          size: [canvas.width, canvas.height, 1],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        depthTextureView = depthTexture.createView();
+      }
+
+      function updateUniforms() {
+        const uniformBufferSize =
+          2 * MAT4_SIZE +
+          4 * VEC4_SIZE +
+          1 * (VEC3_SIZE + VEC3_PADDING) +
+          2 * FLOAT32_SIZE +
+          8; // 8: padding
+
+        objects.forEach((object, i) => {
+          const { alias } = object;
+
+          const modelViewMatrix = camera.getViewTransform();
+
+          const normalMatrix = mat4.inverse(modelViewMatrix);
+          mat4.transpose(normalMatrix, normalMatrix);
+
+          if (alias === "floor" && !floor) {
+            object.diffuse = [0, 0, 0, 0];
+          } else if (alias === "floor" && floor) {
+            object.diffuse = [1, 1, 1, 1];
+          }
+
+          if (alias === "cone") {
+            mat4.translate(modelViewMatrix, [0, 0, -3.5], modelViewMatrix);
+          }
+
+          if (alias === "sphere") {
+            mat4.scale(modelViewMatrix, [0.5, 0.5, 0.5], modelViewMatrix);
+            mat4.translate(modelViewMatrix, [0, 0, 2.5], modelViewMatrix);
+          }
+
+          const uniformData = new Float32Array(uniformBufferSize / FLOAT_SIZE);
+
+          let offset = 0;
+
+          // set vertex shader uniform
+          uniformData.set(modelViewMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(normalMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.ambient ?? materialAmbient, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.diffuse ?? materialDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightAmbient, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightPosition, offset);
+          offset += VEC3_SIZE / FLOAT_SIZE;
+
+          uniformData[offset] = object.wireframe ? 1 : 0;
+          offset += FLOAT32_SIZE / FLOAT_SIZE;
+
+          uniformData[offset] = useLambert ? 1 : 0;
+
+          const uniformBuffer = buffers[i].uniformBuffer;
+          const uniformBindSize = buffers[i].uniformBindSize;
+
+          device.queue.writeBuffer(
+            uniformBuffer,
+            MAT4_SIZE,
+            uniformData.buffer,
+            uniformData.byteOffset,
+            uniformBufferSize
+          );
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Update Uniform Bind Group",
+            layout: object.wireframe
+              ? linePipeline.getBindGroupLayout(0)
+              : trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: uniformBindSize,
+                },
+              },
+            ],
+          });
+
+          buffers[i].uniformBindGroup = uniformBindGroup;
+        });
+      }
+
+      async function draw() {
+        const commandEncoder = device.createCommandEncoder();
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: context.getCurrentTexture().createView(),
+              loadOp: "clear",
+              clearValue: [0.9, 0.9, 0.9, 1.0],
+              storeOp: "store",
+            },
+          ],
+          depthStencilAttachment: {
+            view: depthTextureView,
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+
+        // ブレンド定数を設定。ブレンド定数はブレンド名にconstantが含まれる場合に使用されます。
+        pass.setBlendConstant([...blendingColor.concat(blendingAlpha)]);
+
+        for (const {
+          vertexBuffer,
+          indexBuffer,
+          indexLength,
+          uniformBindGroup,
+          wireframe,
+        } of buffers) {
+          const pipeline = wireframe ? linePipeline : trianglePipeline;
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, uniformBindGroup);
+          pass.setVertexBuffer(0, vertexBuffer);
+          pass.setIndexBuffer(indexBuffer, "uint16");
+          pass.drawIndexed(indexLength);
+        }
+
+        pass.end();
+        device.queue.submit([commandEncoder.finish()]);
+      }
+      function render() {
+        requestAnimationFrame(render);
+        draw();
+        updateUniforms();
+      }
+
+      function autoResizeCanvas(canvas) {
+        const expandFullScreen = () => {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          if (device && context) {
+            context.configure({
+              device: device,
+              format: canvasFormat,
+              size: { width: canvas.width, height: canvas.height },
+            });
+
+            const depthTexture = device.createTexture({
+              size: [canvas.width, canvas.height, 1],
+              format: "depth24plus",
+              usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+            depthTextureView = depthTexture.createView();
+
+            updateProjectionMatrix();
+          }
+        };
+
+        expandFullScreen();
+        window.addEventListener("resize", expandFullScreen);
+      }
+
+      function updateProjectionMatrix() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = 0.1;
+        const far = 10000;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        objects.forEach((_, i) => {
+          const vertexUniformBuffer = buffers[i].vertexUniformBuffer;
+          device.queue.writeBuffer(
+            vertexUniformBuffer,
+            0,
+            projectionMatrix.buffer,
+            projectionMatrix.byteOffset,
+            MAT4_SIZE
+          );
+        });
+      }
+
+      function initControls() {
+        const blendFuncs = [
+          "zero",
+          "one",
+          "src", // src_color
+          "dst", // dst_color
+          "src-alpha",
+          "dst-alpha",
+          "constant", // constant_color or constant_alpha
+          "one-minus-src-alpha",
+          "one-minus-dst-alpha",
+          "one-minus-src", // one_minus_src_color
+          "one-minus-dst", // one_minus_dst_color
+          "one-minus-constant", // one_minus_constant_color or one_minus_constant_alpha
+          "src-alpha-saturate",
+        ];
+
+        const getState = (v) => (v ? "enable" : "disable");
+
+        function getObject(alias) {
+          return objects.find((object) => object.alias === alias);
+        }
+
+        function renderFirst(alias) {
+          const object = getObject(alias);
+          const index = objects.indexOf(object);
+          if (index === 0) return;
+
+          objects.splice(index, 1);
+          objects.splice(0, 0, object);
+          printRenderOrder();
+        }
+
+        function renderSooner(alias) {
+          const object = getObject(alias);
+          const index = objects.indexOf(object);
+          if (index === 0) return;
+
+          objects.splice(index, 1);
+          objects.splice(index - 1, 0, object);
+          printRenderOrder();
+        }
+
+        function printRenderOrder() {
+          const renderOrder = objects.map((object) => object.alias).join(" > ");
+          console.info("Render Order:", renderOrder);
+        }
+
+        utils.configureControls({
+          Blending: {
+            value: blending,
+            onChange: (v) => {
+              blending = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Depth Testing": {
+            value: depthTest,
+            onChange: (v) => {
+              depthTest = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Back Face Culling": {
+            value: culling,
+            onChange: (v) => {
+              culling = v;
+              setupShadersAndPipeline();
+            },
+          },
+          Lambert: {
+            value: useLambert,
+            onChange: (v) => (useLambert = v),
+          },
+          Floor: {
+            value: floor,
+            onChange: (v) => (floor = v),
+          },
+          ...[
+            { name: "Sphere", alias: "sphere", color: sphereColor },
+            { name: "Cone", alias: "cone", color: coneColor },
+          ].reduce((result, data) => {
+            result = {
+              ...result,
+              [`${data.name} Alpha`]: {
+                value: 1,
+                min: 0,
+                max: 1,
+                step: 0.1,
+                onChange: (v) => {
+                  const object = getObject(data.alias);
+                  object.diffuse[3] = v;
+                },
+              },
+              [`${data.name} Color`]: {
+                value: utils.denormalizeColor(data.color),
+                onChange: (v) => {
+                  const object = getObject(data.alias);
+                  object.diffuse = utils.normalizeColor(v);
+                },
+              },
+            };
+            return result;
+          }, {}),
+          "Color Blend Function": {
+            value: colorBlendingEquation,
+            options: ["add", "subtract", "reverse-subtract"],
+            onChange: (v) => {
+              colorBlendingEquation = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Color Src": {
+            value: colorBlendingSource,
+            options: blendFuncs,
+            onChange: (v) => {
+              colorBlendingSource = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Color Dst": {
+            value: colorBlendingTarget,
+            options: blendFuncs,
+            onChange: (v) => {
+              colorBlendingTarget = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Alpha Blend Function": {
+            value: alphaBlendingEquation,
+            options: ["add", "subtract", "reverse-subtract"],
+            onChange: (v) => {
+              alphaBlendingEquation = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Alpha Src": {
+            value: alphaBlendingSource,
+            options: blendFuncs,
+            onChange: (v) => {
+              alphaBlendingSource = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Alpha Dst": {
+            value: alphaBlendingTarget,
+            options: blendFuncs,
+            onChange: (v) => {
+              alphaBlendingTarget = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Constant Color": {
+            value: utils.denormalizeColor(blendingColor),
+            onChange: (v) => {
+              blendingColor = utils.normalizeColor(v);
+              setupShadersAndPipeline();
+            },
+          },
+          "Constant Alpha": {
+            value: 1,
+            min: 0,
+            max: 1,
+            step: 0.1,
+            onChange: (v) => {
+              blendingAlpha = v;
+              setupShadersAndPipeline();
+            },
+          },
+          "Render Order": {
+            value: "Cone First",
+            options: ["Cone First", "Sphere First"],
+            onChange: (v) => {
+              if (v === "Sphere First") {
+                renderSooner("sphere");
+                renderFirst("floor");
+              } else {
+                renderSooner("cone");
+                renderFirst("floor");
+              }
+              // 既存のバッファをクリア
+              utils.releaseResources(buffers);
+              buffers = [];
+              setupBuffers();
+            },
+          },
+          Reset: () => {
+            depthTest = true;
+            blending = true;
+            culling = true;
+            useLambert = true;
+            floor = true;
+            blendingEquation = "add";
+            blendingSource = "src-alpha";
+            blendingTarget = "one-minus-src-alpha";
+            camera.goHome([0, 5, 35]);
+            camera.setFocus([0, 0, 0]);
+            camera.setAzimuth(25);
+            camera.setElevation(-25);
+            setupShadersAndPipeline();
+          },
+        });
+      }
+
+      window.onload = init;
+      window.addEventListener("unload", utils.releaseResources(buffers));
+    </script>
+  </head>
+  <body>
+    <canvas id="webgpu-canvas">
+      Your browser does not support the HTML5 canvas element.
+    </canvas>
+  </body>
+</html>
