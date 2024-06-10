@@ -56,7 +56,7 @@
       out vec4 fragColor;
 
       void main(void){
-        fragColor = texture(uSampler2, vTextureCoords) * texture(uSampler, vTextureCoords);
+        fragColor = vec4(texture(uSampler2, vTextureCoords).rgb - texture(uSampler, vTextureCoords).rgb, 1.0);
       }
     </script>
 
