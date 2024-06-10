@@ -1,0 +1,551 @@
+<html>
+  <head>
+    <title>Real-Time 3D Graphics with WebGPU</title>
+    <link rel="stylesheet" href="../../common/lib/normalize.css" />
+    <script type="text/javascript" src="../../common/js/utils.js"></script>
+    <script type="text/javascript" src="../../common/lib/dat.gui.js"></script>
+    <script
+      type="text/javascript"
+      src="../../common/js/EventEmitter.js"
+    ></script>
+    <script type="text/javascript" src="../../common/js/Clock.js"></script>
+    <script type="text/javascript" src="../../common/js/Controls.js"></script>
+    <script type="module" src="../../common/js/Camera.js"></script>
+    <script type="module">
+      ("use strict");
+      import {
+        vec3,
+        vec4,
+        mat4,
+      } from "https://wgpu-matrix.org/dist/1.x/wgpu-matrix.module.js";
+      import Camera from "../../common/js/Camera.js";
+
+      const FLOAT_SIZE = 4,
+        MAT4_SIZE = 16 * FLOAT_SIZE,
+        VEC3_SIZE = 3 * FLOAT_SIZE,
+        VEC4_SIZE = 4 * FLOAT_SIZE,
+        VEC3_PADDING = 4,
+        degToRad = (d) => (d * Math.PI) / 180;
+
+      let canvas,
+        device,
+        context,
+        canvasFormat,
+        camera,
+        trianglePipeline,
+        texture,
+        sampler,
+        objects = [],
+        buffers = [],
+        depthTextureView,
+        lightPosition = vec3.fromValues(0, 5, 30),
+        lightAmbient = vec4.fromValues(1, 1, 1, 1),
+        lightDiffuse = vec4.fromValues(1, 1, 1, 1),
+        materialDiffuse = vec4.fromValues(1, 1, 1, 1),
+        materialAmbient = vec4.fromValues(0.2, 0.2, 0.2, 1),
+        wrappingU = "repeat",
+        wrappingV = "repeat";
+
+      async function init() {
+        canvas = setupCanvas();
+        await setupWebGPU(canvas);
+        setupCamera();
+        await setupShadersAndPipeline();
+        await loadTexture();
+        await loadObjects();
+        setupBuffers();
+        render();
+        initControls();
+      }
+
+      function setupCanvas() {
+        canvas = utils.getCanvas("webgpu-canvas");
+        autoResizeCanvas(canvas);
+        return canvas;
+      }
+
+      async function setupWebGPU(canvas) {
+        if (!navigator.gpu) {
+          throw new Error("WebGPU not supported on this browser.");
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          throw new Error("No appropriate GPUAdapter found.");
+        }
+        device = await adapter.requestDevice();
+        context = utils.getGPUContext(canvas);
+        canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+          device: device,
+          format: canvasFormat,
+        });
+      }
+
+      function setupCamera() {
+        camera = new Camera(Camera.ORBITING_TYPE);
+        camera.goHome([0, 0, 4]);
+        camera.setFocus([0, 0, 0]);
+        camera.setAzimuth(45);
+        camera.setElevation(-30);
+        new Controls(camera, canvas);
+      }
+
+      async function setupShadersAndPipeline() {
+        const vertexShaderModule = device.createShaderModule({
+          code: await fetch("./vertexShader.wgsl").then((res) => res.text()),
+        });
+
+        const fragmentShaderModule = device.createShaderModule({
+          code: await fetch("./fragmentShader.wgsl").then((res) => res.text()),
+        });
+
+        const vertexBufferLayout = {
+          arrayStride: 5 * Float32Array.BYTES_PER_ELEMENT, // vec3 + vec2
+          attributes: [
+            // position
+            {
+              format: "float32x3",
+              offset: 0,
+              shaderLocation: 0,
+            },
+            // texcoord
+            {
+              format: "float32x2", // vec2<f32>
+              offset: 3 * Float32Array.BYTES_PER_ELEMENT,
+              shaderLocation: 1,
+            },
+          ],
+        };
+
+        const uniformBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: {
+                type: "uniform",
+              },
+            },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.FRAGMENT,
+              texture: { sampleType: "float" },
+            },
+          ],
+        });
+
+        trianglePipeline = device.createRenderPipeline({
+          label: "Triangle mipmapPipeline",
+          layout: device.createPipelineLayout({
+            bindGroupLayouts: [uniformBindGroupLayout],
+          }),
+          vertex: {
+            module: vertexShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout],
+          },
+          fragment: {
+            module: fragmentShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [
+              {
+                format: canvasFormat,
+                blend: {
+                  color: {
+                    srcFactor: "src-alpha",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                  alpha: {
+                    srcFactor: "src-alpha",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                },
+              },
+            ],
+          },
+          primitive: {
+            topology: "triangle-list",
+            cullMode: "none",
+          },
+          depthStencil: {
+            format: "depth24plus",
+            depthWriteEnabled: true,
+            depthCompare: "less",
+          },
+        });
+      }
+
+      async function loadTexture() {
+        const img = new Image();
+        img.src = "../../common/images/webgl-marble.png";
+        await img.decode();
+
+        const imageBitmap = await createImageBitmap(img);
+
+        texture = device.createTexture({
+          size: [img.width, img.height, 1],
+          format: "rgba8unorm",
+          usage:
+            GPUTextureUsage.TEXTURE_BINDING |
+            GPUTextureUsage.COPY_DST |
+            GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+
+        device.queue.copyExternalImageToTexture(
+          { source: imageBitmap },
+          { texture: texture },
+          [img.width, img.height, 1]
+        );
+
+        sampler = device.createSampler({
+          magFilter: "linear",
+          minFilter: "linear",
+          addressModeU: wrappingU,
+          addressModeV: wrappingV,
+        });
+      }
+
+      async function loadObjects() {
+        const objectPromises = [
+          loadObject("../../common/models/geometries/cube-texture.json"),
+        ];
+
+        await Promise.all(objectPromises)
+          .then(() => {
+            console.log("All objects loaded:", objects);
+          })
+          .catch((error) => {
+            console.error("Error loading objects:", error);
+          });
+      }
+
+      function addObject(data) {
+        objects.push(data);
+      }
+
+      function loadObject(filePath) {
+        return fetch(filePath)
+          .then((res) => res.json())
+          .then((data) => {
+            objects.push(data);
+          });
+      }
+
+      function setupBuffers() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = camera.minZ;
+        const far = camera.maxZ;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        const SUM_MAT4_SIZE = 3 * MAT4_SIZE;
+        const SUM_VEC3_SIZE = 1 * (VEC3_SIZE + VEC3_PADDING);
+        const SUM_VEC4_SIZE = 4 * VEC4_SIZE;
+        const SUM_FLOAT32_SIZE = 3 * FLOAT_SIZE + 4; // 4: パディング
+
+        const alignedSize =
+          SUM_MAT4_SIZE + SUM_VEC3_SIZE + SUM_VEC4_SIZE + SUM_FLOAT32_SIZE;
+
+        objects.forEach((object, i) => {
+          const modelViewMatrix = camera.getViewTransform();
+
+          const normalMatrix = mat4.inverse(modelViewMatrix);
+          mat4.transpose(normalMatrix, normalMatrix);
+
+          const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+          let offset = 0;
+
+          uniformData.set(projectionMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(modelViewMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(normalMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightPosition, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightAmbient, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.diffuse ?? materialDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.ambient ?? materialAmbient, offset);
+
+          const uniformBuffer = device.createBuffer({
+            label: "Uniform Buffer",
+            size: uniformData.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Uniform Bind Group",
+            layout: trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: uniformData.byteLength,
+                },
+              },
+              { binding: 1, resource: sampler },
+              { binding: 2, resource: texture.createView() },
+            ],
+          });
+
+          const vertices = object.vertices;
+          let indices = new Uint16Array(object.indices);
+          const normals = utils.createNormals(vertices, indices);
+          const scalars = object.scalars;
+          const texcoords = object.textureCoords; // テクスチャ座標
+          const vertexData = [];
+
+          for (let i = 0; i < vertices.length / 3; i++) {
+            const vertexIndex = i * 3;
+            const texcoordIndex = i * 2; // テクスチャ座標のインデックス
+
+            vertexData.push(
+              vertices[vertexIndex],
+              vertices[vertexIndex + 1],
+              vertices[vertexIndex + 2], // position
+              texcoords[texcoordIndex],
+              texcoords[texcoordIndex + 1] // texcoord
+            );
+          }
+
+          const vertexDataFloat32Array = new Float32Array(vertexData);
+
+          const vertexBuffer = device.createBuffer({
+            label: "Vertex Buffer",
+            size: vertexDataFloat32Array.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(vertexBuffer, 0, vertexDataFloat32Array);
+
+          indices = utils.padUint16ArrayToMultipleOf4(indices);
+
+          const indexBuffer = device.createBuffer({
+            label: "Index Buffer",
+            size: indices.byteLength,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+          });
+          device.queue.writeBuffer(indexBuffer, 0, indices);
+
+          buffers.push({
+            vertexBuffer: vertexBuffer,
+            indexBuffer: indexBuffer,
+            indexLength: indices.length,
+            uniformBindGroup: uniformBindGroup,
+            uniformBuffer: uniformBuffer,
+            bindGroupSize: uniformData.byteLength,
+          });
+        });
+
+        const depthTexture = device.createTexture({
+          size: [canvas.width, canvas.height, 1],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        depthTextureView = depthTexture.createView();
+      }
+
+      function updateUniforms() {
+        const SUM_MAT4_SIZE = 2 * MAT4_SIZE;
+        const SUM_VEC4_SIZE = 4 * VEC4_SIZE;
+        const SUM_VEC3_SIZE = 1 * (VEC3_SIZE + VEC3_PADDING);
+        const SUM_FLOAT32_SIZE = 3 * FLOAT_SIZE + 4; // 4: パディング
+
+        const alignedSize =
+          SUM_MAT4_SIZE + SUM_VEC3_SIZE + SUM_VEC4_SIZE + SUM_FLOAT32_SIZE;
+
+        objects.forEach((object, i) => {
+          const modelViewMatrix = camera.getViewTransform();
+
+          const normalMatrix = mat4.inverse(modelViewMatrix);
+          mat4.transpose(normalMatrix, normalMatrix);
+
+          const uniformData = new Float32Array(alignedSize / FLOAT_SIZE);
+          let offset = 0;
+
+          uniformData.set(modelViewMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(normalMatrix, offset);
+          offset += MAT4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightPosition, offset);
+          offset += (VEC3_SIZE + VEC3_PADDING) / FLOAT_SIZE;
+
+          uniformData.set(lightDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(lightAmbient, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.diffuse ?? materialDiffuse, offset);
+          offset += VEC4_SIZE / FLOAT_SIZE;
+
+          uniformData.set(object.ambient ?? materialAmbient, offset);
+
+          const uniformBuffer = buffers[i].uniformBuffer;
+          const bindGroupSize = buffers[i].bindGroupSize;
+          device.queue.writeBuffer(
+            uniformBuffer,
+            MAT4_SIZE,
+            uniformData.buffer,
+            uniformData.byteOffset,
+            alignedSize
+          );
+
+          const uniformBindGroup = device.createBindGroup({
+            label: "Update Uniform Bind Group",
+            layout: object.wireframe
+              ? linePipeline.getBindGroupLayout(0)
+              : trianglePipeline.getBindGroupLayout(0),
+            entries: [
+              {
+                binding: 0,
+                resource: {
+                  buffer: uniformBuffer,
+                  size: bindGroupSize,
+                },
+              },
+              { binding: 1, resource: sampler },
+              { binding: 2, resource: texture.createView() },
+            ],
+          });
+
+          buffers[i].uniformBindGroup = uniformBindGroup;
+        });
+      }
+
+      async function draw() {
+        const commandEncoder = device.createCommandEncoder();
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: context.getCurrentTexture().createView(),
+              loadOp: "clear",
+              clearValue: [1.0, 1.0, 1.0, 1.0],
+              storeOp: "store",
+            },
+          ],
+          depthStencilAttachment: {
+            view: depthTextureView,
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+
+        pass.setPipeline(trianglePipeline);
+
+        for (const {
+          vertexBuffer,
+          indexBuffer,
+          indexLength,
+          uniformBindGroup,
+        } of buffers) {
+          pass.setBindGroup(0, uniformBindGroup);
+          pass.setVertexBuffer(0, vertexBuffer);
+          pass.setIndexBuffer(indexBuffer, "uint16");
+          pass.drawIndexed(indexLength);
+        }
+
+        pass.end();
+        device.queue.submit([commandEncoder.finish()]);
+      }
+      function render() {
+        requestAnimationFrame(render);
+        draw();
+        updateUniforms();
+      }
+
+      function autoResizeCanvas(canvas) {
+        const expandFullScreen = () => {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          if (device && context) {
+            context.configure({
+              device: device,
+              format: canvasFormat,
+              size: { width: canvas.width, height: canvas.height },
+            });
+
+            const depthTexture = device.createTexture({
+              size: [canvas.width, canvas.height, 1],
+              format: "depth24plus",
+              usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+            depthTextureView = depthTexture.createView();
+
+            updateProjectionMatrix();
+          }
+        };
+
+        expandFullScreen();
+        window.addEventListener("resize", expandFullScreen);
+      }
+
+      function updateProjectionMatrix() {
+        const fov = degToRad(45);
+        const aspect = canvas.width / canvas.height;
+        const near = 0.1;
+        const far = 10000;
+        const projectionMatrix = mat4.perspective(fov, aspect, near, far);
+
+        objects.forEach((_, i) => {
+          const uniformBuffer = buffers[i].uniformBuffer;
+          device.queue.writeBuffer(
+            uniformBuffer,
+            0,
+            projectionMatrix.buffer,
+            projectionMatrix.byteOffset,
+            MAT4_SIZE
+          );
+        });
+      }
+
+      function initControls() {
+        const wrapOptions = ["clamp-to-edge", "repeat", "mirror-repeat"];
+
+        utils.configureControls({
+          ...["TEXTURE_WRAP_S", "TEXTURE_WRAP_T"].reduce((result, axis) => {
+            result[axis] = {
+              value: wrappingU,
+              options: wrapOptions,
+              onChange: (v) => {
+                if (axis === "TEXTURE_WRAP_S") {
+                  wrappingU = v;
+                } else {
+                  wrappingV = v;
+                }
+                loadTexture();
+              },
+            };
+            return result;
+          }, {}),
+        });
+      }
+
+      window.onload = init;
+      window.addEventListener("unload", utils.releaseResources(buffers));
+    </script>
+  </head>
+  <body>
+    <canvas id="webgpu-canvas">
+      Your browser does not support the HTML5 canvas element.
+    </canvas>
+  </body>
+</html>
