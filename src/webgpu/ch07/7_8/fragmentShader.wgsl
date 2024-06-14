@@ -11,10 +11,7 @@ struct FragmentInput {
 @fragment
 fn fragmentMain(input: FragmentInput) -> @location(0) vec4<f32> {
     let texture1 = textureSample(myTexture1, mySampler1, input.texcoord);
-
-    var normal = normalize(input.normal);
-    normal.y = -normal.y; // 上下反転
-    let texture2 = textureSample(myTexture2, mySampler2, normal);
+    let texture2 = textureSample(myTexture2, mySampler2, input.normal);
 
     return texture1 * texture2;
 }
