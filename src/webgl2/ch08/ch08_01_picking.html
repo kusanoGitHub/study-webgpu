@@ -239,11 +239,13 @@
       }
 
       function addHit(obj) {
+        console.log("addHit", obj);
         obj.previous = obj.diffuse.slice(0);
         obj.diffuse[3] = 0.5;
       }
 
       function removeHit(obj) {
+        console.log("removeHit", obj);
         obj.diffuse = obj.previous.slice(0);
       }
 

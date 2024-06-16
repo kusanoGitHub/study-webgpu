@@ -5,7 +5,7 @@ class Controls {
   constructor(camera, canvas) {
     this.camera = camera;
     this.canvas = canvas;
-    this.picker = null;
+    this.picking = false;
 
     this.dragging = false;
     this.picking = false;
@@ -31,11 +31,6 @@ class Controls {
     window.onkeyup = (event) => this.onKeyUp(event);
   }
 
-  // オブジェクトをピッキングするためのピッカーを設定
-  setPicker(picker) {
-    this.picker = picker;
-  }
-
   // 2D座標を返す
   get2DCoords(event) {
     let top = 0,
@@ -57,13 +52,8 @@ class Controls {
     };
   }
 
-  onMouseUp(event) {
+  onMouseUp() {
     this.dragging = false;
-
-    if (!event.shiftKey && this.picker) {
-      this.picking = false;
-      this.picker.stop();
-    }
   }
 
   onMouseDown(event) {
@@ -79,13 +69,6 @@ class Controls {
         this.camera.position[1],
         this.camera.position[2]
       ) / 100;
-
-    if (!this.picker) return;
-
-    const coordinates = this.get2DCoords(event);
-    this.picking = this.picker.find(coordinates);
-
-    if (!this.picking) this.picker.stop();
   }
 
   onMouseMove(event) {
@@ -103,8 +86,7 @@ class Controls {
     const dx = this.x - this.lastX;
     const dy = this.y - this.lastY;
 
-    if (this.picking && this.picker.moveCallback) {
-      this.picker.moveCallback(dx, dy);
+    if (this.picking) {
       return;
     }
 
