@@ -275,10 +275,16 @@ const utils = {
 
   // バッファの解放
   releaseResources(buffers) {
-    buffers.forEach(({ vertexBuffer, indexBuffer, uniformBuffer }) => {
-      vertexBuffer.destroy();
-      indexBuffer.destroy();
-      uniformBuffer.destroy();
-    });
+    if (Array.isArray(buffers)) {
+      buffers.forEach(({ vertexBuffer, indexBuffer, uniformBuffer }) => {
+        vertexBuffer.destroy();
+        indexBuffer.destroy();
+        uniformBuffer.destroy();
+      });
+    } else {
+      buffers.vertexBuffer && buffers.vertexBuffer.destroy();
+      buffers.indexBuffer && buffers.indexBuffer.destroy();
+      buffers.uniformBuffer && buffers.uniformBuffer.destroy();
+    }
   },
 };
