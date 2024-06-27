@@ -220,7 +220,7 @@ const utils = {
   },
 
   // Calculate tangets for a given set of vertices
-  calculateTangents(vs, tc, ind) {
+  calculateTangents(vec3, vs, tc, ind) {
     const tangents = [];
 
     for (let i = 0; i < vs.length / 3; i++) {
@@ -244,8 +244,8 @@ const utils = {
       const tex1 = [tc[i1 * 2], tc[i1 * 2 + 1]];
       const tex2 = [tc[i2 * 2], tc[i2 * 2 + 1]];
 
-      vec3.subtract(a, pos1, pos0);
-      vec3.subtract(b, pos2, pos0);
+      a = vec3.subtract(pos1, pos0);
+      b = vec3.subtract(pos2, pos0);
 
       const c2c1b = tex1[1] - tex0[1];
       const c3c1b = tex2[0] - tex0[1];
@@ -255,10 +255,9 @@ const utils = {
         c3c1b * a[1] - c2c1b * b[1],
         c3c1b * a[2] - c2c1b * b[2],
       ];
-
-      vec3.add(triTangent, tangents[i0], triTangent);
-      vec3.add(triTangent, tangents[i1], triTangent);
-      vec3.add(triTangent, tangents[i2], triTangent);
+      vec3.add(tangents[i0], triTangent, triTangent);
+      vec3.add(tangents[i1], triTangent, triTangent);
+      vec3.add(tangents[i2], triTangent, triTangent);
     }
 
     // Normalize tangents
