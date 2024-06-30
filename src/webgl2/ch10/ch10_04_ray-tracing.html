@@ -81,35 +81,38 @@
       vec3 backgroundColor = vec3(0.2);
       vec3 ambient = vec3(0.05, 0.1, 0.1);
 
-      vec4 sphere = vec4(1.0);
-      vec3 sphereColor = vec3(0.9, 0.8, 0.6);
+      vec4 spheres[2];
+      vec3 sphereColors[2];
       float maxDistance = 1024.0;
 
       float intersect(vec3 ro, vec3 rd, out vec3 norm, out vec3 color) {
         float distance = maxDistance;
 
-        // If we wanted multiple objects in the scene you would loop through them here
-        // and return the normal and color with the closest intersection point (lowest distance).
-        float intersectionDistance = sphereIntersection(ro, rd, sphere);
+        // Loop through spheres
+        for (int i = 0; i < 2; i++) {
+          float intersectionDistance = sphereIntersection(ro, rd, spheres[i]);
 
-        if (intersectionDistance > 0.0 && intersectionDistance < distance) {
-          distance = intersectionDistance;
-          // Point of intersection
-          vec3 pt = ro + distance * rd;
-          // Get normal for that point
-          norm = sphereNormaml(pt, sphere);
-          // Get color for the sphere
-          color = sphereColor;
+          if (intersectionDistance > 0.0 && intersectionDistance < distance) {
+            distance = intersectionDistance;
+            // Point of intersection
+            vec3 pt = ro + distance * rd;
+            // Get normal for that point
+            norm = sphereNormaml(pt, spheres[i]);
+            // Get color for the sphere
+            color = sphereColors[i];
+          }
         }
 
         return distance;
       }
 
-
       void main(void) {
-        // Wiggle the sphere back and forth a bit
-        sphere.x = 1.5 * sin(uTime);
-        sphere.z = 0.5 * cos(uTime * 3.0);
+        // Wiggle the spheres back and forth a bit
+        spheres[0] = vec4(1.5 * sin(uTime), 0.0, 0.5 * cos(uTime * 3.0), 1.0);
+        spheres[1] = vec4(6.0 * sin(uTime), 0.0, 0.5 * cos(uTime * 3.0 + 1.0), 1.0);
+
+        sphereColors[0] = vec3(0.9, 0.8, 0.6);
+        sphereColors[1] = vec3(0.6, 0.8, 0.9);
 
         // Pixel coordinate of the fragment being rendered
         vec2 uv = gl_FragCoord.xy * uInverseTextureSize;
